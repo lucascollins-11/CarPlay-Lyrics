@@ -41,9 +41,10 @@ enum AudioRouteKind: String, CaseIterable, Identifiable, Sendable {
 /// Follows the phone's audio route and tells the model, so the right timing adjustment applies.
 @MainActor
 final class AudioRouteMonitor {
-    private var observer: NSObjectProtocol?
+    /// Only set in init and read in deinit.
+    nonisolated(unsafe) private var observer: NSObjectProtocol?
 
-    init(onChange: @escaping @MainActor (AudioRouteKind) -> Void) {
+    init(onChange: @escaping @MainActor @Sendable (AudioRouteKind) -> Void) {
         onChange(.current)
         observer = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main

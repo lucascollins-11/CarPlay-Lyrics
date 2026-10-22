@@ -126,6 +126,7 @@ These can only be measured on a real iPhone in a real car. Pass/fail thresholds:
 | 13 | Ask Siri to play something in another app, then go back to Spotify | The Dashboard line recovers without touching the phone |
 | 14 | Unplug and replug CarPlay (or turn the car off and on) mid-song | The Dashboard line recovers without touching the phone |
 | 15 | A long drive on a hot day, phone in a mount in the sun | Lyrics keep updating; note if iOS shows a temperature warning |
+| 16 | Tune Settings > Drive mode > **Send lines early** until the Dashboard line changes with the singer | Record the value (and the car) in your report |
 
 If #2 fails (updates throttled), the fallback is to show the next line in advance; tell
 Claude the measured delay.
