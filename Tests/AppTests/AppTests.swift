@@ -233,3 +233,48 @@ final class BackgroundKeepAliveTests: XCTestCase {
         XCTAssertTrue(data.dropFirst(44).allSatisfy { $0 == 0 }, "silence")
     }
 }
+
+final class DriveModeIdlePolicyTests: XCTestCase {
+    let start = Date(timeIntervalSinceReferenceDate: 0)
+    func at(_ minutes: Double) -> Date { start.addingTimeInterval(minutes * 60) }
+
+    func testNeverStopsWhileConnectedToCarPlay() {
+        var policy = DriveModeIdlePolicy()
+        for minute in stride(from: 0.0, through: 120, by: 0.5) {
+            XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: true, now: at(minute)), "a fuel stop with the car on")
+        }
+    }
+
+    func testStopsAfterIdleWhenNotInTheCar() {
+        var policy = DriveModeIdlePolicy()
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: false, now: at(0)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(1)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(15)))
+        XCTAssertTrue(policy.shouldStop(isPlaying: false, inCar: false, now: at(16)))
+    }
+
+    func testPlayingResetsTheIdleTimer() {
+        var policy = DriveModeIdlePolicy()
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(0)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: false, now: at(14)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(20)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(34)))
+        XCTAssertTrue(policy.shouldStop(isPlaying: false, inCar: false, now: at(35)))
+    }
+
+    func testStopsAWhileAfterLeavingTheCarEvenWithMusic() {
+        var policy = DriveModeIdlePolicy()
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: true, now: at(0)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: false, now: at(30)), "just got out")
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: false, now: at(45)))
+        XCTAssertTrue(policy.shouldStop(isPlaying: true, inCar: false, now: at(50)))
+    }
+
+    func testGettingBackInTheCarCancelsTheCountdown() {
+        var policy = DriveModeIdlePolicy()
+        _ = policy.shouldStop(isPlaying: false, inCar: true, now: at(0))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: false, now: at(1)))
+        XCTAssertFalse(policy.shouldStop(isPlaying: false, inCar: true, now: at(10)), "back from the coffee shop")
+        XCTAssertFalse(policy.shouldStop(isPlaying: true, inCar: true, now: at(40)))
+    }
+}

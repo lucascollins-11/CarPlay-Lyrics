@@ -18,6 +18,10 @@ public actor LyricsStore: LyricsProvider {
     private let directory: URL
     private var memory: [String: Lyrics] = [:]
     private var inFlight: [String: Task<Lyrics, Error>] = [:]
+    /// Bumped by `choose`, `resetChoice` and `clear`, so a lookup that was already
+    /// running doesn't overwrite the user's pick or bring back deleted lyrics.
+    private var generations: [String: Int] = [:]
+    private var clearCount = 0
 
     public init(client: LRCLibClient, directory: URL) {
         self.client = client
@@ -39,14 +43,22 @@ public actor LyricsStore: LyricsProvider {
             return try await running.value
         }
         let client = self.client
+        let started = (generations[track.id, default: 0], clearCount)
         let lookup = Task<(LRCLibRecord?, Lyrics), Error> {
             let record = try await client.lyrics(for: track)
             return (record, Lyrics(record: record))
         }
         inFlight[track.id] = Task { try await lookup.value.1 }
-        defer { inFlight[track.id] = nil }
+        defer {
+            // A newer lookup may have taken this slot after a choose/clear; leave that one alone.
+            if started == (generations[track.id, default: 0], clearCount) { inFlight[track.id] = nil }
+        }
 
         let (record, lyrics) = try await lookup.value
+        guard started == (generations[track.id, default: 0], clearCount) else {
+            // Something changed while the lookup ran; what's stored now wins.
+            return memory[track.id] ?? lyrics
+        }
         if let record {
             writeEntry(Entry(record: record, chosenByUser: false), trackID: track.id)
         }
@@ -66,6 +78,8 @@ public actor LyricsStore: LyricsProvider {
            let fetched = try await client.get(id: record.id) {
             full = fetched
         }
+        generations[track.id, default: 0] += 1
+        inFlight[track.id] = nil
         writeEntry(Entry(record: full, chosenByUser: true), trackID: track.id)
         let lyrics = Lyrics(record: full)
         memory[track.id] = lyrics
@@ -73,6 +87,8 @@ public actor LyricsStore: LyricsProvider {
     }
 
     public func resetChoice(for track: NowPlayingTrack) async throws -> Lyrics {
+        generations[track.id, default: 0] += 1
+        inFlight[track.id] = nil
         memory[track.id] = nil
         try? FileManager.default.removeItem(at: fileURL(trackID: track.id))
         return try await lyrics(for: track)
@@ -86,6 +102,8 @@ public actor LyricsStore: LyricsProvider {
     /// Deletes every cached lyric (the user's picks too). Returns the number of files removed.
     @discardableResult
     public func clear() -> Int {
+        clearCount += 1
+        inFlight.removeAll()
         memory.removeAll()
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         var removed = 0

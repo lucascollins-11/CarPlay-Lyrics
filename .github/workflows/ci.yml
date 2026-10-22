@@ -41,7 +41,25 @@ jobs:
           echo "Using simulator $UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
-      - name: Build for device (checks the device entitlements and signing setup)
+      - name: Check entitlements per SDK (no CarPlay entitlement on device builds)
+        run: |
+          set -euo pipefail
+          ent() {
+            xcodebuild -showBuildSettings -project CarPlayLyrics.xcodeproj -target CarPlayLyrics -sdk "$1" 2>/dev/null \
+              | awk -F' = ' '/ CODE_SIGN_ENTITLEMENTS /{print $2; exit}'
+          }
+          DEVICE=$(ent iphoneos)
+          SIM=$(ent iphonesimulator)
+          echo "device: $DEVICE"
+          echo "simulator: $SIM"
+          test -f "$DEVICE" && test -f "$SIM"
+          if /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.carplay-audio' "$DEVICE" >/dev/null 2>&1; then
+            echo "::error::Device builds must not request com.apple.developer.carplay-audio (Apple won't grant it)"
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.carplay-audio' "$SIM" >/dev/null
+
+      - name: Build for device (unsigned)
         run: |
           set -o pipefail
           xcodebuild build -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \

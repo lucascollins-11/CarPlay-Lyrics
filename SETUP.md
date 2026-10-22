@@ -72,9 +72,11 @@ entitlement to Simulator builds; see step 7.)
    also show on the Lock Screen and in the Dynamic Island.
 
 Drive mode keeps the app running in the background with a silent audio session. It
-doesn't interrupt or duck Spotify and never becomes the "Now Playing" app. It turns
-itself off after 15 minutes with nothing playing, and iOS ends any Live Activity after
-8 hours; start it again the next day. If Live Activities are off for the app, turn them
+doesn't interrupt or duck Spotify and never becomes the "Now Playing" app. While
+CarPlay is connected it never turns itself off (a fuel stop with the car on is fine).
+Otherwise it turns itself off 20 minutes after CarPlay disconnects, after 15 minutes with
+nothing playing, or when you sign out. iOS ends any Live Activity after 8 hours; start it
+again the next day. If Live Activities are off for the app, turn them
 on in Settings > Lyrics.
 
 Glance at the dashboard only when it's safe. Don't read lyrics while driving.
@@ -94,6 +96,8 @@ These can only be measured on a real iPhone in a real car. Pass/fail thresholds:
 | 7 | Pause in Spotify | Dashboard shows "Paused" within 3 s |
 | 8 | Skip to the next song | New song's first line within 3 s (or "Finding lyrics…") |
 | 9 | Battery over a 1-hour drive | Under ~5% extra drain compared with Spotify alone |
+| 10 | Stop for 10 minutes with the car off (fuel, coffee), then drive on | Lyrics come back on the Dashboard without touching the phone |
+| 11 | Park, get out, leave the phone alone | Drive mode ends by itself within ~20 minutes |
 
 If #2 fails (updates throttled), the fallback is to show the next line in advance; tell
 Claude the measured delay.
@@ -135,4 +139,4 @@ UI-test screenshots in the run's `TestResults` artifact.
 | "Nothing playing" while music plays | Podcasts, Private Sessions and some local files don't report a song. |
 | "No lyrics for this song" | LRCLIB has none. Try **Wrong lyrics?** to search, or add them at lrclib.net. |
 | Lyrics consistently early or late | Use − / + under the lyrics (this song) or Settings > Timing (all songs). |
-| Drive mode stops by itself | Nothing played for 15 minutes, or the 8-hour Live Activity limit. Start it again. |
+| Drive mode stops by itself | 20 minutes after CarPlay disconnected, nothing played for 15 minutes away from the car, you signed out, or the 8-hour Live Activity limit. Start it again. |

@@ -188,6 +188,11 @@ final class NowPlayingModel: ObservableObject {
         } catch {
             guard generation == sourceGeneration else { return 0 }
             let delay = engine.pollFailed(error, at: deps.now())
+            if engine.needsSignIn, !isDemo {
+                // Spotify keeps refusing even fresh tokens (for example the app's settings changed
+                // in the Spotify dashboard). Bring back the sign-in screen instead of failing quietly.
+                auth.signOut()
+            }
             publish()
             return delay
         }

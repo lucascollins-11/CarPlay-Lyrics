@@ -75,6 +75,17 @@ final class NowPlayingModelTests: XCTestCase {
         XCTAssertTrue(model.snapshot.problem?.contains("User Management") ?? false)
     }
 
+    func testPersistentUnauthorizedSignsOut() async {
+        spotify.play(makeTrack("a"), at: 0)
+        await model.pollOnce()
+        spotify.next = .failure(SpotifyAPIError.unauthorized)
+        for _ in 1..<NowPlayingEngine.maxUnauthorized { await model.pollOnce() }
+        XCTAssertTrue(auth.isSignedIn, "one or two 401s can be a blip")
+        await model.pollOnce()
+        XCTAssertFalse(auth.isSignedIn, "the sign-in screen comes back instead of polling forever")
+        await waitUntil { !self.model.snapshot.isSignedIn }
+    }
+
     func testCancellationIsNotAProblem() async {
         spotify.next = .failure(URLError(.cancelled))
         await model.pollOnce()

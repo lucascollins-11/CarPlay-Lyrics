@@ -200,7 +200,9 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(engine.nextPollDelay(at: 112), 5, "paused")
 
         _ = engine.apply(playing(track, at: 58.5), at: 120)
-        XCTAssertEqual(engine.nextPollDelay(at: 126), 0.75, "song about to end")
+        XCTAssertEqual(engine.nextPollDelay(at: 121), 0.9, accuracy: 0.001, "song about to end")
+        XCTAssertEqual(engine.nextPollDelay(at: 121.4), 0.75, "never faster than 0.75 s")
+        XCTAssertEqual(engine.nextPollDelay(at: 126), 3, "sitting at the end: back to normal, early polls are capped separately")
 
         engine.noteUserAction(at: 200)
         _ = engine.apply(.nothing, at: 200)
@@ -217,6 +219,64 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(taken, NowPlayingEngine.maxEarlyPolls)
         _ = engine.apply(playing(other, at: 0), at: 130)
         XCTAssertFalse(engine.takeEarlyPoll(at: 131), "new song")
+    }
+
+    /// The playing device went offline: Spotify keeps saying "playing" with the same position.
+    func testFrozenPositionHoldsTheLineAndSlowsPolling() {
+        var engine = loadedEngine(at: 10, time: 100)
+        XCTAssertEqual(engine.snapshot.currentLine, 1)
+        var lines: [Int?] = [engine.snapshot.currentLine]
+        var delays: [TimeInterval] = []
+        for step in 1...3 {
+            let time = 100 + Double(step) * 3
+            _ = engine.apply(playing(track, at: 10), at: time)
+            engine.tick(at: time + 0.5)
+            lines.append(engine.snapshot.currentLine)
+            delays.append(engine.nextPollDelay(at: time + 0.5))
+        }
+        XCTAssertTrue(engine.isStalled)
+        XCTAssertFalse(engine.snapshot.isPlaying, "shown as paused")
+        XCTAssertEqual(lines.compactMap { $0 }, lines.compactMap { $0 }.sorted(), "the line never moves backwards")
+        XCTAssertEqual(lines.last, 2, "held where the clock had got to")
+        XCTAssertGreaterThanOrEqual(delays.last ?? 0, 3, "no endless fast polling")
+        engine.tick(at: 200)
+        XCTAssertEqual(engine.snapshot.currentLine, 2, "frozen while stalled")
+
+        // Playback really moves again (the device is back).
+        _ = engine.apply(playing(track, at: 30), at: 120)
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertTrue(engine.snapshot.isPlaying)
+        XCTAssertEqual(engine.snapshot.currentLine, 5)
+        XCTAssertEqual(engine.nextPollDelay(at: 120), NowPlayingEngine.fastPollInterval)
+    }
+
+    func testOrdinaryPlaybackIsNotAStall() {
+        var engine = loadedEngine(at: 10, time: 100)
+        for step in 1...5 {
+            _ = engine.apply(playing(track, at: 10 + Double(step) * 3), at: 100 + Double(step) * 3)
+        }
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertTrue(engine.snapshot.isPlaying)
+        // Two quick polls in a row can report the same position without it being a stall.
+        _ = engine.apply(playing(track, at: 25.3), at: 115.3)
+        XCTAssertFalse(engine.isStalled)
+    }
+
+    func testRepeatedUnauthorizedAsksForSignIn() {
+        var engine = loadedEngine()
+        for _ in 1..<NowPlayingEngine.maxUnauthorized {
+            _ = engine.pollFailed(SpotifyAPIError.unauthorized, at: 101)
+        }
+        XCTAssertFalse(engine.needsSignIn)
+        _ = engine.apply(playing(track, at: 2), at: 102)
+        _ = engine.pollFailed(SpotifyAPIError.unauthorized, at: 103)
+        XCTAssertFalse(engine.needsSignIn, "a good poll resets the count")
+        for _ in 1..<NowPlayingEngine.maxUnauthorized {
+            _ = engine.pollFailed(SpotifyAPIError.unauthorized, at: 104)
+        }
+        XCTAssertTrue(engine.needsSignIn)
+        engine.setSignedIn(false)
+        XCTAssertFalse(engine.needsSignIn)
     }
 
     func testSignOutResets() {

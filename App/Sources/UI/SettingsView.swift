@@ -67,7 +67,7 @@ struct SettingsView: View {
         } header: {
             Text("Drive mode")
         } footer: {
-            Text("Shows the current line as a Live Activity on the Lock Screen and in the Dynamic Island, and on the CarPlay Dashboard with iOS 26. Start it before you drive. It keeps the app running in the background with a silent audio session (Spotify keeps playing), stops by itself after 15 minutes with nothing playing, and iOS ends it after 8 hours. Glance only when it is safe.")
+            Text("Shows the current line as a Live Activity on the Lock Screen and in the Dynamic Island, and on the CarPlay Dashboard with iOS 26. Start it before you drive. It keeps the app running in the background with a silent audio session (Spotify keeps playing), never stops by itself while connected to CarPlay, stops 20 minutes after CarPlay disconnects or after 15 minutes with nothing playing, and iOS ends it after 8 hours. Glance only when it is safe.")
         }
     }
 

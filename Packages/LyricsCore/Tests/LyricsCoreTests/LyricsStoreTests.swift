@@ -133,4 +133,39 @@ final class LyricsStoreTests: XCTestCase {
         let cached = await store.cachedCount()
         XCTAssertEqual(cached, 0)
     }
+
+    func testSlowLookupDoesNotOverwriteTheUsersPick() async throws {
+        let http = StubHTTP { [synced] _ in
+            Thread.sleep(forTimeInterval: 0.2)
+            return (200, json(synced), [:])
+        }
+        let store = makeStore(http)
+        let track = self.track
+        let prefetch = Task { try await store.lyrics(for: track) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let pick = LRCLibRecord(id: 99, trackName: "Song", artistName: "Artist", albumName: nil, duration: 200,
+                                instrumental: false, plainLyrics: "picked", syncedLyrics: nil)
+        _ = try await store.choose(pick, for: track)
+        _ = try await prefetch.value
+
+        let chosen = await store.isChosenByUser(track)
+        XCTAssertTrue(chosen, "the finished lookup must not replace the pick")
+        let lyrics = try await store.lyrics(for: track)
+        XCTAssertEqual(lyrics, .plain(["picked"]))
+    }
+
+    func testSlowLookupDoesNotRefillAClearedCache() async throws {
+        let http = StubHTTP { [synced] _ in
+            Thread.sleep(forTimeInterval: 0.2)
+            return (200, json(synced), [:])
+        }
+        let store = makeStore(http)
+        let track = self.track
+        let prefetch = Task { try await store.lyrics(for: track) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await store.clear()
+        _ = try await prefetch.value
+        let cached = await store.cachedCount()
+        XCTAssertEqual(cached, 0, "Delete my data stays deleted")
+    }
 }

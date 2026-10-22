@@ -1,4 +1,5 @@
 import ActivityKit
+import AVFoundation
 import Combine
 import Foundation
 import LyricsCore
@@ -6,14 +7,13 @@ import LyricsCore
 /// Drive mode puts the current lyric line in a Live Activity, which iOS 26
 /// shows on the CarPlay Dashboard (and on the Lock Screen and Dynamic Island
 /// everywhere). It keeps the app alive in the background while it runs, and
-/// switches itself off when nothing has played for a while.
+/// switches itself off after leaving the car or when nothing has played for a
+/// while (see `DriveModeIdlePolicy`).
 @MainActor
 final class DriveModeController: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var message: String?
 
-    /// Stop after this long with nothing playing, to save battery.
-    static let idleTimeout: TimeInterval = 15 * 60
     /// Minimum time between two Live Activity updates.
     static let minimumUpdateInterval: TimeInterval = 0.4
 
@@ -27,7 +27,7 @@ final class DriveModeController: ObservableObject {
     private var lastSent: LiveLyricsContent?
     private var pending: LiveLyricsContent?
     private var lastUpdateAt: Date = .distantPast
-    private var idleSince: Date?
+    private var idlePolicy = DriveModeIdlePolicy()
 
     static let client = "driveMode"
 
@@ -91,7 +91,7 @@ final class DriveModeController: ObservableObject {
     private func attach(to activity: Activity<LyricsActivityAttributes>) {
         self.activity = activity
         isRunning = true
-        idleSince = nil
+        idlePolicy = DriveModeIdlePolicy()
         do {
             try keepAlive.start()
         } catch {
@@ -144,18 +144,26 @@ final class DriveModeController: ObservableObject {
         message = "Drive mode ended. Start it again before your next drive."
     }
 
-    /// Switches off after a long stretch of silence. Returns true if it stopped.
+    /// Switches off when the policy says so, or right away after signing out. Returns true if it stopped.
     private func stopIfIdle(_ snapshot: NowPlayingSnapshot) -> Bool {
-        if snapshot.track != nil, snapshot.isPlaying {
-            idleSince = nil
-        } else if idleSince == nil {
-            idleSince = Date()
-        } else if let idleSince, Date().timeIntervalSince(idleSince) > Self.idleTimeout {
+        if !snapshot.isSignedIn, !snapshot.isDemo {
             stop()
-            message = "Drive mode stopped because nothing was playing."
+            message = "Drive mode stopped because you signed out of Spotify."
+            return true
+        }
+        let playing = snapshot.track != nil && snapshot.isPlaying
+        if idlePolicy.shouldStop(isPlaying: playing, inCar: Self.isConnectedToCar, now: Date()) {
+            let leftCar = idlePolicy.leftCarAt != nil
+            stop()
+            message = leftCar ? "Drive mode stopped a while after CarPlay disconnected." : "Drive mode stopped because nothing was playing."
             return true
         }
         return false
+    }
+
+    /// True while audio goes to CarPlay.
+    static var isConnectedToCar: Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .carAudio }
     }
 
     private func heartbeat() {
@@ -192,5 +200,42 @@ final class DriveModeController: ObservableObject {
     /// If updates stop arriving (the app was suspended), iOS greys the line out instead of showing a stale one.
     private func staleDate(for content: LiveLyricsContent) -> Date {
         Date().addingTimeInterval(content.isPlaying ? 45 : 15 * 60)
+    }
+}
+
+/// When Drive mode switches itself off. Never while connected to CarPlay, so a
+/// stop for fuel or coffee doesn't end it; otherwise after a stretch with nothing
+/// playing, or a while after leaving the car even if music carries on in headphones.
+struct DriveModeIdlePolicy {
+    /// Not in the car and nothing playing for this long.
+    static let idleTimeout: TimeInterval = 15 * 60
+    /// This long after CarPlay disconnects, whatever is playing.
+    static let afterCarTimeout: TimeInterval = 20 * 60
+
+    private(set) var idleSince: Date?
+    private(set) var leftCarAt: Date?
+    private var wasInCar = false
+
+    mutating func shouldStop(isPlaying: Bool, inCar: Bool, now: Date) -> Bool {
+        if inCar {
+            wasInCar = true
+            leftCarAt = nil
+            idleSince = nil
+            return false
+        }
+        if wasInCar {
+            wasInCar = false
+            leftCarAt = now
+        }
+        if let leftCarAt, now.timeIntervalSince(leftCarAt) >= Self.afterCarTimeout {
+            return true
+        }
+        if isPlaying {
+            idleSince = nil
+            return false
+        }
+        let since = idleSince ?? now
+        idleSince = since
+        return now.timeIntervalSince(since) >= Self.idleTimeout
     }
 }
