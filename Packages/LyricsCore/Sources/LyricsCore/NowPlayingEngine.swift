@@ -238,6 +238,12 @@ public struct NowPlayingEngine: Sendable {
                 // cached answer: keep the clock running and don't re-anchor backwards. If it
                 // persists, the playing device went offline: hold the line where it is (never
                 // jump back) and poll at the normal pace until it moves again.
+                if !isStalled, clock?.pendingRewind != nil {
+                    // The answer before was a jump back, and this one says the same: the device
+                    // stopped there. Go back to it once (the clock confirms the rewind).
+                    clock?.update(position: sample.position, at: time, isPlaying: true, duration: track.duration,
+                                  uncertainty: uncertainty)
+                }
                 if !isStalled, repeatCount >= Self.stallMinimumRepeats, let since = repeatSince,
                    time - since >= Self.stallMinimumSpan, let current = clock?.position(at: time) {
                     clock = PlaybackClock(position: current, at: time, isPlaying: false, duration: track.duration)

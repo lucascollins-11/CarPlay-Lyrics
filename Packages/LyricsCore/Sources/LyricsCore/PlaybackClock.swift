@@ -25,6 +25,17 @@ public struct PlaybackClock: Equatable, Sendable {
     /// of `position - time` that all of them allow, which narrows with each sample. Empty means the
     /// music moved: a slip too small to count as a seek.
     public private(set) var offsetBounds: ClosedRange<Double>
+    /// A jump back seen once while playing, waiting for the next answer to agree. Spotify sometimes
+    /// answers with a position a second or two old; taking that as a seek would make the lyrics
+    /// jump back and forward again. A real backward seek shows one answer later.
+    public private(set) var pendingRewind: (position: TimeInterval, time: TimeInterval)?
+
+    public static func == (a: PlaybackClock, b: PlaybackClock) -> Bool {
+        a.anchorPosition == b.anchorPosition && a.anchorTime == b.anchorTime && a.isPlaying == b.isPlaying
+            && a.duration == b.duration && a.anchorVariance == b.anchorVariance && a.offsetBounds == b.offsetBounds
+            && a.pendingRewind?.position == b.pendingRewind?.position && a.pendingRewind?.time == b.pendingRewind?.time
+            && a.jitterTolerance == b.jitterTolerance
+    }
 
     /// A sample further than this from the prediction (or than its own
     /// uncertainty, if larger) is a real jump: a seek, skip back or repeat.
@@ -38,6 +49,8 @@ public struct PlaybackClock: Equatable, Sendable {
     /// How fast the bounds widen (seconds per second): the phone's clock and the device's can drift
     /// apart slightly, so old samples bound the music less tightly.
     public static let boundsDrift: Double = 0.002
+    /// A jump back to within this many seconds of the start, from this close to the end, is taken at once.
+    public static let restartWindow: TimeInterval = 5
 
     /// - Parameter uncertainty: half the round trip of the request the position came from.
     public init(position: TimeInterval, at time: TimeInterval, isPlaying: Bool, duration: TimeInterval? = nil,
@@ -84,9 +97,27 @@ public struct PlaybackClock: Equatable, Sendable {
     public mutating func update(position: TimeInterval, at time: TimeInterval, isPlaying: Bool, duration: TimeInterval? = nil,
                                 uncertainty: TimeInterval = 0) -> Bool {
         if let duration { self.duration = duration }
+        let duration = self.duration
         let predicted = self.position(at: time)
         let measurementVariance = Self.variance(uncertainty: uncertainty)
         let threshold = max(jitterTolerance, uncertainty + 2 * (anchorVariance + measurementVariance).squareRoot())
+        let rewind = pendingRewind
+        pendingRewind = nil
+        if isPlaying == self.isPlaying, isPlaying, position < predicted - threshold {
+            // Backwards while playing: only once a second answer agrees (see `pendingRewind`).
+            // Agrees: the music runs on from there, or it is stuck there (a device that stopped
+            // without saying so; see the engine's stall handling).
+            let agrees = rewind.map {
+                abs($0.position + (time - $0.time) - position) <= threshold || abs($0.position - position) <= threshold
+            } ?? false
+            // Back to the start right at the end is repeat-one (or a restart), not a stale answer.
+            let restartAtEnd = position < Self.restartWindow
+                && duration.map { predicted >= $0 - Self.restartWindow } ?? false
+            if !agrees, !restartAtEnd {
+                pendingRewind = (position, time)
+                return false
+            }
+        }
         if isPlaying == self.isPlaying, isPlaying, abs(predicted - position) <= threshold {
             // Blend in, unless the clock sits at the end of the song (the clamp hides how far off it is).
             if self.duration.map({ predicted < $0 }) ?? true {

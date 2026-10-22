@@ -59,6 +59,9 @@ final class SyncSimulationTests: XCTestCase {
     /// The longest a change can take to show: a request already in flight when it happened
     /// (it measured too early), then one poll interval, then that request's round trip.
     var detectionLimit: Double { maxRTT + NowPlayingEngine.playingPollInterval + maxRTT + 0.1 }
+    /// A backward seek waits for a second answer that agrees: one more poll and round trip.
+    var rewindDelay: Double { NowPlayingEngine.playingPollInterval + maxRTT }
+    func limit(for name: String) -> Double { detectionLimit + (name.hasPrefix("rewind") ? rewindDelay : 0) }
 
     /// Lines of varied length (1.5 to 6 s), like real songs.
     func makeLines(seed: UInt64, duration: TimeInterval) -> LyricsTimeline {
@@ -97,15 +100,19 @@ final class SyncSimulationTests: XCTestCase {
             // Scripted events.
             while let next = script.first, next.at <= now {
                 script.removeFirst()
+                let before = truth.position
                 truth.apply(next.event)
                 lastEventAt = now
                 switch next.event {
                 case .seek(let to):
                     // Jumping back is the point of a backward seek.
-                    if to < truth.position + 1 { allowBackwardUntil = now + detectionLimit }
+                    if to < before + 1 { allowBackwardUntil = now + detectionLimit + rewindDelay }
                     // Shown once the clock re-anchored there, within that request's precision.
                     let precision = maxRTT / 2 + 0.05
-                    pendingDetections.append(("seek@\(Int(now))", now, { engine, truth in
+                    // A seek back is only believed once a second answer agrees (stale answers), so one poll later.
+                    let name = to < before ? "rewind" : "seek"
+                    if to < before { lastEventAt = now + rewindDelay }
+                    pendingDetections.append(("\(name)@\(Int(now))", now, { engine, truth in
                         abs((engine.position(at: now) ?? -9) - truth.position) < precision }))
                 case .pause:
                     // The clock ran on until the pause was seen; it then goes back to where the music stopped.
@@ -117,7 +124,7 @@ final class SyncSimulationTests: XCTestCase {
                     pendingDetections.append(("skip@\(Int(now))", now, { engine, _ in engine.snapshot.track?.id == track.id }))
                 case .deviceOffline:
                     // Like a pause: the first frozen answer is the truth, and the clock goes back to it once.
-                    allowBackwardUntil = now + detectionLimit
+                    allowBackwardUntil = now + detectionLimit + rewindDelay
                 case .deviceBack:
                     // A stall is held at the clock's estimate; Spotify's real position then wins (pinned elsewhere).
                     allowBackwardUntil = now + detectionLimit
@@ -210,7 +217,7 @@ final class SyncSimulationTests: XCTestCase {
             errors += result.steadyErrors
             XCTAssertTrue(result.backwardMoves.isEmpty, "seed \(seed): line moved backwards \(result.backwardMoves)")
             for (name, delay) in result.detection {
-                XCTAssertLessThanOrEqual(delay, detectionLimit, "seed \(seed): \(name) took \(delay) s to show")
+                XCTAssertLessThanOrEqual(delay, limit(for: name), "seed \(seed): \(name) took \(delay) s to show")
             }
         }
         let p95 = percentile(errors, 0.95)
@@ -231,7 +238,7 @@ final class SyncSimulationTests: XCTestCase {
             XCTAssertTrue(result.backwardMoves.isEmpty, "seed \(seed): \(result.backwardMoves)")
             XCTAssertLessThan(percentile(result.steadyErrors, 0.95), 0.1)
             for (name, delay) in result.detection {
-                XCTAssertLessThanOrEqual(delay, detectionLimit + NowPlayingEngine.playingPollInterval + maxRTT,
+                XCTAssertLessThanOrEqual(delay, limit(for: name) + NowPlayingEngine.playingPollInterval + maxRTT,
                                          "seed \(seed): \(name) took \(delay) s")
             }
         }

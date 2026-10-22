@@ -1,0 +1,42 @@
+import XCTest
+@testable import LyricsCore
+
+/// Spotify sometimes answers from a cache for remote devices: the position is a second or
+/// two OLD (not identical to the last one, so it is not a "cached repeat"), and the next
+/// answer is right again. The lyrics must not jump back and forth for that.
+final class ClockStaleAnswerTests: XCTestCase {
+    func steadyClock() -> (PlaybackClock, Double) {
+        var clock = PlaybackClock(position: 100, at: 1000, isPlaying: true, duration: 300, uncertainty: 0.15)
+        var t = 1000.0
+        for _ in 0..<10 {
+            t += 1.5
+            clock.update(position: 100 + (t - 1000), at: t, isPlaying: true, duration: 300, uncertainty: 0.15)
+        }
+        return (clock, t)
+    }
+
+    func testOneStaleAnswerDoesNotRewindTheClock() {
+        var (clock, t) = steadyClock()
+        t += 1.5
+        // This answer is 1.8 s old: it reports where the music was 1.8 s ago.
+        clock.update(position: 100 + (t - 1000) - 1.8, at: t, isPlaying: true, duration: 300, uncertainty: 0.15)
+        let shown = clock.position(at: t)
+        XCTAssertEqual(shown, 100 + (t - 1000), accuracy: 0.5, "a single stale answer moved the clock back by \(100 + (t - 1000) - shown) s")
+        // The next answer is right, and the clock is right.
+        t += 1.5
+        clock.update(position: 100 + (t - 1000), at: t, isPlaying: true, duration: 300, uncertainty: 0.15)
+        XCTAssertEqual(clock.position(at: t), 100 + (t - 1000), accuracy: 0.1)
+    }
+
+    func testRealBackwardSeekIsStillFollowedWithinTwoPolls() {
+        var (clock, t) = steadyClock()
+        // The user jumps back 20 s; the answers keep agreeing with the new position.
+        var seen = false
+        for poll in 1...2 {
+            t += 1.5
+            clock.update(position: 80 + 1.5 * Double(poll), at: t, isPlaying: true, duration: 300, uncertainty: 0.15)
+            if abs(clock.position(at: t) - (80 + 1.5 * Double(poll))) < 0.3 { seen = true }
+        }
+        XCTAssertTrue(seen, "a real backward seek must be followed within two polls")
+    }
+}

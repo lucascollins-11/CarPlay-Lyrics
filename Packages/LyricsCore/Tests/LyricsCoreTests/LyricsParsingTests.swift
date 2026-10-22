@@ -186,7 +186,10 @@ final class PlaybackClockTests: XCTestCase {
                        "within the round trip's uncertainty: not a seek")
         XCTAssertTrue(clock.update(position: 60, at: 104, isPlaying: true))
         XCTAssertEqual(clock.position(at: 105), 61, accuracy: 0.0001)
-        XCTAssertTrue(clock.update(position: 5, at: 106, isPlaying: true), "seeking backwards")
+        XCTAssertFalse(clock.update(position: 5, at: 106, isPlaying: true), "one answer back could be a stale one")
+        XCTAssertEqual(clock.position(at: 106), 62, accuracy: 0.0001)
+        XCTAssertTrue(clock.update(position: 6.5, at: 107.5, isPlaying: true), "seeking backwards, once a second answer agrees")
+        XCTAssertEqual(clock.position(at: 108), 7, accuracy: 0.0001)
     }
 
     func testPausedPositionChangesAreFollowed() {
