@@ -93,6 +93,9 @@ Then **Actions > iPhone build > Run workflow** and pick one of two ways in:
 
 With a free Apple ID the install stops opening after **7 days** (the app warns you two
 days ahead); run Sideloadly again with the same `.ipa`. A paid account makes it a year.
+Free Apple IDs also allow only 3 sideloaded apps at once and 10 new App IDs a week, and
+this app uses 2 (the app and its Live Activity widget). If Sideloadly reports an App ID
+limit, remove an old sideloaded app or wait a few days.
 
 **B. TestFlight (paid Apple Developer account, $99/year; no computer at all)**
 
@@ -115,6 +118,10 @@ Everything below works from a phone browser or the Apple Developer app.
 6. Install **TestFlight** from the App Store on the iPhone, signed in with the same Apple ID.
    The build appears there after processing (5 to 30 minutes; App Store Connect may ask
    you to add yourself to an internal testing group the first time).
+
+If the first TestFlight run fails at the export step with a signing-certificate error,
+tell Claude: the fix is to sign during the archive step instead (API key plus
+`-allowProvisioningUpdates` there too).
 
 TestFlight builds stop opening after **90 days**; run the workflow again for a fresh one.
 Internal TestFlight builds are visible only to your own team, nothing is public.
