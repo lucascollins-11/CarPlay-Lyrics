@@ -78,6 +78,9 @@ public struct SpotifyAccounts: Sendable {
             URLQueryItem(name: "code_challenge", value: PKCE.challenge(for: verifier)),
             URLQueryItem(name: "scope", value: scopes.joined(separator: " ")),
             URLQueryItem(name: "state", value: state),
+            // Always ask which account: without it the shared browser session silently reuses
+            // whichever Spotify account Safari is logged into (a partner's, say).
+            URLQueryItem(name: "show_dialog", value: "true"),
         ]
         return components.url!
     }

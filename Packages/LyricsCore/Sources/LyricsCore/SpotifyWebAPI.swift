@@ -36,6 +36,31 @@ public enum SpotifyAPIError: Error, Equatable, LocalizedError {
 }
 
 /// The few Spotify Web API endpoints the app uses.
+/// `GET /v1/me`: which account is signed in.
+public struct SpotifyProfile: Equatable, Sendable, Decodable {
+    public var id: String?
+    public var displayName: String?
+    /// "premium", "free" or "open"; only sent when the token has the `user-read-private` scope.
+    public var product: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, product
+        case displayName = "display_name"
+    }
+
+    public init(id: String? = nil, displayName: String? = nil, product: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.product = product
+    }
+
+    /// What to show as "Signed in as …".
+    public var label: String {
+        if let name = displayName?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return name }
+        return id ?? "your Spotify account"
+    }
+}
+
 public struct SpotifyWebAPI: PlaybackSource {
     /// Returns a valid access token; `forceRefresh` asks for a new one after a 401.
     public typealias TokenProvider = @Sendable (_ forceRefresh: Bool) async throws -> String
@@ -61,6 +86,12 @@ public struct SpotifyWebAPI: PlaybackSource {
         sample.requestStart = response.start
         sample.requestEnd = response.end
         return sample
+    }
+
+    /// The signed-in account, so the app can say whose music it is following (EC6).
+    public func me() async throws -> SpotifyProfile {
+        let response = try await send("GET", "me")
+        return try JSONDecoder().decode(SpotifyProfile.self, from: response.data)
     }
 
     public func upcomingTracks() async throws -> [NowPlayingTrack] {
@@ -102,9 +133,23 @@ public struct SpotifyWebAPI: PlaybackSource {
                 request.setValue("0", forHTTPHeaderField: "Content-Length")
             }
 
-            let start = now()
-            let (data, response) = try await http.send(request)
-            let end = now()
+            let startDate = Date()
+            var start = now()
+            let (data, response, window) = try await http.sendTimed(request)
+            var end = now()
+            // Spotify measured the position while handling the request: after it was sent and
+            // before the first response byte. Narrow the window to that when the client knows it
+            // (a slow TLS handshake otherwise inflates the uncertainty by seconds). The wall-clock
+            // dates are mapped onto the monotonic clock from the start, and clamped to the full round trip.
+            if let window {
+                let from = start + window.requestEnd.timeIntervalSince(startDate)
+                let to = start + window.responseStart.timeIntervalSince(startDate)
+                if from <= to {
+                    let fullStart = start, fullEnd = end
+                    start = min(max(from, fullStart), fullEnd)
+                    end = min(max(to, start), fullEnd)
+                }
+            }
             switch response.statusCode {
             case 200..<300:
                 return Response(data: data, status: response.statusCode, start: start, end: end)
