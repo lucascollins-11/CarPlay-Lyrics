@@ -38,22 +38,55 @@ public enum Lyrics: Equatable, Sendable {
     case instrumental
     case notFound
 
-    public init(record: LRCLibRecord?) {
+    /// - Parameter trackDuration: the song's length, used to spot timestamps that run past
+    ///   its end when the record doesn't say how long it is.
+    public init(record: LRCLibRecord?, trackDuration: TimeInterval? = nil) {
         guard let record else { self = .notFound; return }
+        var degenerate: LyricsTimeline?
         if record.hasSyncedLyrics, let lrc = record.syncedLyrics {
             let timeline = LyricsTimeline(lrc: lrc)
             if !timeline.isEmpty {
-                self = .synced(timeline)
-                return
+                if !timeline.hasUnusableTiming(duration: record.duration ?? trackDuration) {
+                    self = .synced(timeline)
+                    return
+                }
+                degenerate = timeline
             }
         }
         if record.hasPlainLyrics, let plain = record.plainLyrics {
-            self = .plain(plain.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) })
+            self = .plain(LRCParser.normalizeLineEndings(plain).components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) })
+        } else if let degenerate, case let words = degenerate.lines.filter({ !$0.isGap }).map(\.text), !words.isEmpty {
+            // Timestamps are junk but the words are fine: show them unsynced rather than wrong.
+            self = .plain(words)
         } else if record.instrumental == true {
             self = .instrumental
         } else {
             self = .notFound
         }
+    }
+
+    public var isSynced: Bool {
+        if case .synced = self { return true }
+        return false
+    }
+}
+
+extension LyricsTimeline {
+    /// True when following these timestamps would show the wrong line for much of the song:
+    /// most lines share one timestamp (often every line at `[00:00.00]`), or lines start
+    /// after the song has ended (timings from a longer cut).
+    public func hasUnusableTiming(duration: TimeInterval?) -> Bool {
+        let sung = lines.filter { !$0.isGap }
+        if sung.count >= 3 {
+            var counts: [TimeInterval: Int] = [:]
+            for line in sung { counts[line.time, default: 0] += 1 }
+            if let most = counts.values.max(), most * 2 > sung.count { return true }
+        }
+        if let duration, duration > 0, let last = sung.last ?? lines.last, last.time > duration + 2 {
+            return true
+        }
+        return false
     }
 }
 
@@ -114,7 +147,7 @@ public struct LRCLibClient: Sendable {
 
         func consider(_ record: LRCLibRecord?) -> LRCLibRecord? {
             guard let record, Self.durationMatches(record, track) else { return nil }
-            if record.hasSyncedLyrics { return record }
+            if Lyrics(record: record, trackDuration: track.duration).isSynced { return record }
             // Keep the first plain/instrumental hit in case nothing synced turns up.
             if fallback == nil, record.hasPlainLyrics || record.instrumental == true { fallback = record }
             return nil
@@ -142,21 +175,42 @@ public struct LRCLibClient: Sendable {
             }
         }
 
+        // A synced search hit ends the lookup. Otherwise try free-text search, which matches
+        // artists spelled differently (romanized names, "A & B" vs "A, B", featured artists).
+        var results: [LRCLibRecord] = []
+        var titleSearchWorked = false
         do {
-            let results = try await search(title: simplified, artist: track.primaryArtist)
-            if let best = Self.bestMatch(in: results, for: track), best.hasSyncedLyrics || fallback == nil {
+            results = try await search(title: simplified, artist: track.primaryArtist)
+            titleSearchWorked = true
+            if let best = Self.bestMatch(in: results, for: track), Self.isSynced(best, for: track) {
                 return best
             }
-            return fallback
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             lastError = error
         }
 
+        do {
+            results += try await search(query: "\(simplified) \(track.primaryArtist)")
+            lastError = nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // A failed extra search doesn't turn the title search's "nothing found" into an error.
+            if titleSearchWorked { lastError = nil } else { lastError = error }
+        }
+        if let best = Self.bestMatch(in: results, for: track), Self.isSynced(best, for: track) || fallback == nil {
+            return best
+        }
+
         if let fallback { return fallback }
         if let lastError { throw lastError }
         return nil
+    }
+
+    static func isSynced(_ record: LRCLibRecord, for track: NowPlayingTrack) -> Bool {
+        Lyrics(record: record, trackDuration: track.duration).isSynced
     }
 
     /// LRCLIB's signature match allows ±2 s; anything further apart is another cut of the song.
@@ -236,10 +290,15 @@ public struct LRCLibClient: Sendable {
         guard durationGap <= 5 else { return nil }
 
         var value = 0.0
-        if record.hasSyncedLyrics { value += 100 }
-        else if record.hasPlainLyrics { value += 40 }
-        else if record.instrumental == true { value += 20 }
-        if title == wantedTitle { value += 10 }
+        switch Lyrics(record: record, trackDuration: track.duration) {
+        case .synced: value += 100
+        case .plain: value += 40
+        case .instrumental: value += 20
+        case .notFound: break
+        }
+        // The exact title outranks everything else: "Stay" with plain lyrics is right for "Stay",
+        // "Stay With Me" with synced lyrics is another song.
+        if title == wantedTitle { value += 200 }
         value -= durationGap * 4
         return value
     }

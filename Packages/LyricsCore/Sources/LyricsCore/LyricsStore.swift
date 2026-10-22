@@ -22,10 +22,18 @@ public actor LyricsStore: LyricsProvider {
     /// running doesn't overwrite the user's pick or bring back deleted lyrics.
     private var generations: [String: Int] = [:]
     private var clearCount = 0
+    /// Background re-checks of old plain/instrumental entries, by track ID.
+    private var refreshes: [String: Task<Void, Never>] = [:]
+    private let now: @Sendable () -> Date
 
-    public init(client: LRCLibClient, directory: URL) {
+    /// Plain and instrumental results are looked up again after this long, because synced
+    /// lyrics for new releases are often added to LRCLIB weeks later. User picks are never re-checked.
+    public static let recheckInterval: TimeInterval = 14 * 24 * 3600
+
+    public init(client: LRCLibClient, directory: URL, now: @escaping @Sendable () -> Date = { Date() }) {
         self.client = client
         self.directory = directory
+        self.now = now
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -33,9 +41,13 @@ public actor LyricsStore: LyricsProvider {
         if let cached = memory[track.id] {
             return cached
         }
-        if let record = readEntry(trackID: track.id) {
-            let lyrics = Lyrics(record: record.record)
+        if let entry = readEntry(trackID: track.id) {
+            let lyrics = Lyrics(record: entry.record, trackDuration: track.duration)
             memory[track.id] = lyrics
+            if needsRecheck(entry, lyrics: lyrics) {
+                // Show what we have now; a better match is picked up from the next play on.
+                startRecheck(for: track)
+            }
             return lyrics
         }
         // Prefetch and the current song can ask for the same track at once; share the request.
@@ -46,7 +58,7 @@ public actor LyricsStore: LyricsProvider {
         let started = (generations[track.id, default: 0], clearCount)
         let lookup = Task<(LRCLibRecord?, Lyrics), Error> {
             let record = try await client.lyrics(for: track)
-            return (record, Lyrics(record: record))
+            return (record, Lyrics(record: record, trackDuration: track.duration))
         }
         inFlight[track.id] = Task { try await lookup.value.1 }
         defer {
@@ -60,7 +72,7 @@ public actor LyricsStore: LyricsProvider {
             return memory[track.id] ?? lyrics
         }
         if let record {
-            writeEntry(Entry(record: record, chosenByUser: false), trackID: track.id)
+            writeEntry(Entry(record: record, chosenByUser: false, savedAt: now()), trackID: track.id)
         }
         // A miss is only remembered in memory, so it is retried after a relaunch.
         memory[track.id] = lyrics
@@ -80,8 +92,8 @@ public actor LyricsStore: LyricsProvider {
         }
         generations[track.id, default: 0] += 1
         inFlight[track.id] = nil
-        writeEntry(Entry(record: full, chosenByUser: true), trackID: track.id)
-        let lyrics = Lyrics(record: full)
+        writeEntry(Entry(record: full, chosenByUser: true, savedAt: now()), trackID: track.id)
+        let lyrics = Lyrics(record: full, trackDuration: track.duration)
         memory[track.id] = lyrics
         return lyrics
     }
@@ -119,17 +131,71 @@ public actor LyricsStore: LyricsProvider {
         return files.filter { $0.pathExtension == "json" }.count
     }
 
+    // MARK: Re-checking old misses
+
+    private func needsRecheck(_ entry: Entry, lyrics: Lyrics) -> Bool {
+        guard !entry.chosenByUser, !lyrics.isSynced else { return false }
+        // Entries from before `savedAt` existed count as old.
+        guard let savedAt = entry.savedAt else { return true }
+        return now().timeIntervalSince(savedAt) >= Self.recheckInterval
+    }
+
+    private func startRecheck(for track: NowPlayingTrack) {
+        guard refreshes[track.id] == nil else { return }
+        let client = self.client
+        let started = (generations[track.id, default: 0], clearCount)
+        refreshes[track.id] = Task {
+            // Outer nil: the lookup failed. Inner nil: LRCLIB has nothing.
+            let record: LRCLibRecord??
+            do { record = .some(try await client.lyrics(for: track)) } catch { record = nil }
+            self.finishRecheck(track: track, record: record, started: started)
+        }
+    }
+
+    private func finishRecheck(track: NowPlayingTrack, record: LRCLibRecord??, started: (Int, Int)) {
+        refreshes[track.id] = nil
+        // The user picked lyrics or cleared the cache meanwhile: leave it alone.
+        guard started == (generations[track.id, default: 0], clearCount),
+              var entry = readEntry(trackID: track.id), !entry.chosenByUser
+        else { return }
+        // Offline or LRCLIB down: try again on a later launch.
+        guard let record else { return }
+        if let record, Lyrics(record: record, trackDuration: track.duration).isSynced {
+            entry.record = record
+            memory[track.id] = Lyrics(record: record, trackDuration: track.duration)
+        }
+        // Found nothing better: wait another interval before asking again.
+        entry.savedAt = now()
+        writeEntry(entry, trackID: track.id)
+    }
+
+    /// Waits for background re-checks to finish (for tests).
+    func waitForRechecks() async {
+        while let task = refreshes.values.first {
+            await task.value
+        }
+    }
+
     // MARK: Disk
 
     struct Entry: Codable {
         var record: LRCLibRecord
         var chosenByUser: Bool
+        /// When the entry was written. Missing in files from earlier versions.
+        var savedAt: Date?
     }
+
+    /// Longest file name used before switching to a hash; file systems allow 255 bytes.
+    static let maxPlainFileNameLength = 120
 
     func fileURL(trackID: String) -> URL {
         // Spotify IDs are base62; anything else (local files) is hex-encoded to stay filename-safe.
+        // Long local-file keys (artist + title) would pass the file name limit, so they are hashed.
         let isSafe = !trackID.isEmpty && trackID.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) && $0.isASCII }
-        let name = isSafe ? trackID : "x" + trackID.utf8.map { String(format: "%02x", $0) }.joined()
+        var name = isSafe ? trackID : "x" + trackID.utf8.map { String(format: "%02x", $0) }.joined()
+        if name.utf8.count > Self.maxPlainFileNameLength {
+            name = "h" + SHA256Digest.hash(Array(trackID.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
         return directory.appendingPathComponent("\(name).json")
     }
 
@@ -139,7 +205,7 @@ public actor LyricsStore: LyricsProvider {
             return entry
         }
         // Files written by the first version held a bare record.
-        return (try? JSONDecoder().decode(LRCLibRecord.self, from: data)).map { Entry(record: $0, chosenByUser: false) }
+        return (try? JSONDecoder().decode(LRCLibRecord.self, from: data)).map { Entry(record: $0, chosenByUser: false, savedAt: nil) }
     }
 
     private func writeEntry(_ entry: Entry, trackID: String) {
