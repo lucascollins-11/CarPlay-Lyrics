@@ -27,7 +27,7 @@ final class NowPlayingModel: ObservableObject {
                 try await auth.accessToken(forceRefresh: force)
             }
             return Dependencies(spotify: spotify, lyrics: store, store: store, demo: DemoPlayback(),
-                                demoLyrics: DemoLyricsProvider(), now: MonotonicClock.now)
+                                demoLyrics: DemoLyricsProvider(), now: { MonotonicClock.now() })
         }
     }
 

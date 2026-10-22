@@ -391,7 +391,7 @@ private struct DriveModeButton: View {
 
     var body: some View {
         Button {
-            driveMode.isRunning ? driveMode.stop() : driveMode.start()
+            if driveMode.isRunning { driveMode.stop() } else { driveMode.start() }
         } label: {
             Label(driveMode.isRunning ? "Drive mode on" : "Drive mode",
                   systemImage: driveMode.isRunning ? "car.fill" : "car")

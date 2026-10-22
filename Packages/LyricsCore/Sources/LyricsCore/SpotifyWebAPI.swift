@@ -47,7 +47,7 @@ public struct SpotifyWebAPI: PlaybackSource {
     public var now: @Sendable () -> TimeInterval
 
     public init(http: HTTPClient, baseURL: URL = URL(string: "https://api.spotify.com/v1")!,
-                now: @escaping @Sendable () -> TimeInterval = MonotonicClock.now, token: @escaping TokenProvider) {
+                now: @escaping @Sendable () -> TimeInterval = { MonotonicClock.now() }, token: @escaping TokenProvider) {
         self.http = http
         self.token = token
         self.baseURL = baseURL
@@ -55,11 +55,7 @@ public struct SpotifyWebAPI: PlaybackSource {
     }
 
     public func currentlyPlaying() async throws -> PlaybackSample {
-        let response = try await send("GET", "me/player/currently-playing", query: [
-            URLQueryItem(name: "additional_types", value: "track"),
-            // Answers in the user's market, which drops the long available_markets lists (smaller, faster answers).
-            URLQueryItem(name: "market", value: "from_token"),
-        ])
+        let response = try await send("GET", "me/player/currently-playing", query: [URLQueryItem(name: "additional_types", value: "track")])
         var sample = response.status == 204 || response.data.isEmpty ? PlaybackSample.nothing : try PlaybackSample.decode(response.data)
         // Only the final exchange counts: a token refresh or a retry before it says nothing about when Spotify measured.
         sample.requestStart = response.start

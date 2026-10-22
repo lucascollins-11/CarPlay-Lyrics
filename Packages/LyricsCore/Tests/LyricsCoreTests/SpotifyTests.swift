@@ -221,7 +221,8 @@ final class SpotifyWebAPITests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertEqual(request.path, "/v1/me/player/currently-playing")
         XCTAssertEqual(request.query["additional_types"], "track")
-        XCTAssertEqual(request.query["market"], "from_token")
+        // No market: from_token isn't documented for this endpoint, and a 400 would stop every poll (EC33).
+        XCTAssertNil(request.query["market"])
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer stale")
     }
 

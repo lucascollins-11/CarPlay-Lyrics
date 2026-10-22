@@ -65,7 +65,7 @@ struct SettingsView: View {
     private var driveSection: some View {
         Section {
             Button {
-                driveMode.isRunning ? driveMode.stop() : driveMode.start()
+                if driveMode.isRunning { driveMode.stop() } else { driveMode.start() }
             } label: {
                 Label(driveMode.isRunning ? "Stop Drive mode" : "Start Drive mode", systemImage: "car")
             }

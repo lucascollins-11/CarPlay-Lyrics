@@ -32,6 +32,8 @@ final class DriveModeController: ObservableObject {
     private var planTask: Task<Void, Never>?
     private var planWait: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    /// The last Live Activity update sent; each waits for the one before, so they arrive in order.
+    private var lastUpdate: Task<Void, Never>?
     private var planner = DashboardPlanner()
     private var idlePolicy = DriveModeIdlePolicy()
     private let log = Logger(subsystem: "CarPlayLyrics", category: "DriveMode")
@@ -187,6 +189,7 @@ final class DriveModeController: ObservableObject {
         planWait = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        lastUpdate = nil
         activity = nil
         keepAlive.stop()
         keepsRunningInBackground = false
@@ -207,7 +210,7 @@ final class DriveModeController: ObservableObject {
         guard !stopIfIdle(snapshot) else { return nil }
         let plan = planner.plan(snapshot: snapshot, position: model.estimatedPosition(), now: MonotonicClock.now())
         if let content = plan.send {
-            Self.update(ActivityBox(activity), content: content, staleDate: staleDate(for: content))
+            lastUpdate = Self.update(ActivityBox(activity), content: content, staleDate: staleDate(for: content), after: lastUpdate)
         }
         return plan.wakeAfter
     }
@@ -255,8 +258,12 @@ final class DriveModeController: ObservableObject {
         init(_ activity: Activity<LyricsActivityAttributes>) { self.activity = activity }
     }
 
-    nonisolated private static func update(_ box: ActivityBox, content: LiveLyricsContent, staleDate: Date) {
-        Task { await box.activity.update(ActivityContent(state: content, staleDate: staleDate)) }
+    nonisolated private static func update(_ box: ActivityBox, content: LiveLyricsContent, staleDate: Date,
+                                           after previous: Task<Void, Never>?) -> Task<Void, Never> {
+        Task {
+            await previous?.value
+            await box.activity.update(ActivityContent(state: content, staleDate: staleDate))
+        }
     }
 
     nonisolated private static func end(_ box: ActivityBox) {

@@ -36,7 +36,9 @@ struct LyricsEarlierIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        AppServices.shared.model.adjustTrackOffset(by: 0.25)
+        let model = AppServices.shared.model
+        guard model.snapshot.track != nil else { return .result(dialog: "Nothing is playing.") }
+        model.adjustTrackOffset(by: 0.25)
         return .result(dialog: "Lyrics earlier.")
     }
 }
@@ -47,7 +49,9 @@ struct LyricsLaterIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        AppServices.shared.model.adjustTrackOffset(by: -0.25)
+        let model = AppServices.shared.model
+        guard model.snapshot.track != nil else { return .result(dialog: "Nothing is playing.") }
+        model.adjustTrackOffset(by: -0.25)
         return .result(dialog: "Lyrics later.")
     }
 }
