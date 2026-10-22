@@ -242,6 +242,12 @@ final class DriveModeController: ObservableObject {
         if keepAlive.restartIfStopped() {
             log.notice("Keep-alive audio had stopped; restarted it")
         }
+        if keepsRunningInBackground, !keepAlive.isRunning {
+            // The restart failed (iOS refused the audio session): say so, and retry on the next foreground.
+            keepsRunningInBackground = false
+            message = "Drive mode is on, but it can only keep the Dashboard up to date after you open Lyrics once."
+            log.error("Keep-alive audio couldn't be restarted")
+        }
         planWait?.cancel()
     }
 

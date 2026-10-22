@@ -60,4 +60,11 @@ final class ClockStaleAnswerTests: XCTestCase {
         XCTAssertNotNil(engine.clock?.pendingRewind)
         XCTAssertEqual(engine.nextPollDelay(at: t), NowPlayingEngine.rewindConfirmDelay, accuracy: 0.001)
     }
+
+    /// In the intro a stale answer can land near 0:00 too; that one waits for a second answer.
+    func testStaleAnswerInTheIntroIsHeld() {
+        var clock = PlaybackClock(position: 6, at: 100, isPlaying: true, duration: 300, uncertainty: 0.05)
+        XCTAssertFalse(clock.update(position: 4.2, at: 101.5, isPlaying: true, duration: 300, uncertainty: 0.05))
+        XCTAssertEqual(clock.position(at: 101.5), 7.5, accuracy: 0.01)
+    }
 }
