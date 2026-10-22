@@ -5,25 +5,59 @@ on:
   pull_request:
 
 jobs:
-  build:
+  core:
+    name: LyricsCore tests (swift test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        working-directory: Packages/LyricsCore
+        run: swift test
+
+  app:
+    name: App build, unit and UI tests (Simulator)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unit tests (LyricsCore)
-        working-directory: Packages/LyricsCore
-        run: swift test
+      - name: Tools
+        run: brew install xcodegen xcbeautify
 
       - name: Generate Xcode project
-        run: |
-          brew install xcodegen
-          xcodegen generate
+        run: xcodegen generate
 
-      - name: Build app for the Simulator
+      - name: Pick a Simulator
+        id: sim
         run: |
-          xcodebuild build \
-            -project CarPlayLyrics.xcodeproj \
-            -scheme CarPlayLyrics \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            -quiet
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          runtimes = sorted((r for r in data if "iOS" in r), key=lambda r: [int(x) for x in r.rsplit("iOS-", 1)[1].split("-")])
+          for runtime in reversed(runtimes):
+              phones = [d for d in data[runtime] if d["name"].startswith("iPhone") and d["isAvailable"]]
+              if phones:
+                  print(phones[0]["udid"]); break
+          ')
+          echo "Using simulator $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Build for device (checks the device entitlements and signing setup)
+        run: |
+          set -o pipefail
+          xcodebuild build -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
+            -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO | xcbeautify
+
+      - name: Test (unit + UI, demo mode)
+        run: |
+          set -o pipefail
+          xcodebuild test -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath TestResults.xcresult | xcbeautify
+
+      - name: Upload test results and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults
+          path: TestResults.xcresult
+          if-no-files-found: ignore

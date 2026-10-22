@@ -2,71 +2,92 @@ import Combine
 import Foundation
 import LyricsCore
 
-/// The single source of truth shared by the iPhone and CarPlay screens:
-/// what Spotify is playing, where in the song it is, and which lyric line is current.
+/// The single source of truth shared by the iPhone screen, CarPlay and the
+/// Live Activity: what is playing, where in the song it is, and which lyric
+/// line is current. The decisions live in `NowPlayingEngine`; this class runs
+/// the timers and network calls around it.
 @MainActor
 final class NowPlayingModel: ObservableObject {
-    static let shared = NowPlayingModel()
+    /// What the model talks to. Swapped for fakes in tests.
+    struct Dependencies {
+        var spotify: PlaybackSource
+        var lyrics: LyricsProvider
+        /// The disk cache behind `lyrics`, when there is one (clearing, "chosen by you").
+        var store: LyricsStore?
+        var demo: DemoPlayback
+        var demoLyrics: LyricsProvider
+        /// Monotonic seconds.
+        var now: @Sendable () -> TimeInterval
 
-    enum LyricsState: Equatable {
-        case none
-        case loading
-        case loaded(Lyrics)
-        case failed(String)
-    }
-
-    struct Snapshot: Equatable {
-        var isSignedIn = false
-        var track: NowPlayingTrack?
-        var isPlaying = false
-        var lyrics: LyricsState = .none
-        /// Index into the synced lyrics of the line being sung, nil before the first line.
-        var currentLine: Int?
-        /// Shown when Spotify can't be reached; cleared on the next good poll.
-        var problem: String?
-    }
-
-    @Published private(set) var snapshot = Snapshot()
-
-    /// Seconds added to the playback position before picking a line.
-    /// Positive values show lyrics earlier.
-    @Published var timingOffset: Double {
-        didSet {
-            UserDefaults.standard.set(timingOffset, forKey: Self.offsetKey)
-            tick()
+        static func live(auth: SpotifyAuth) -> Dependencies {
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            let store = LyricsStore(client: LRCLibClient(userAgent: AppConfig.lrclibUserAgent),
+                                    directory: caches.appendingPathComponent("Lyrics", isDirectory: true))
+            let spotify = SpotifyWebAPI(http: URLSession.shared) { force in
+                try await auth.accessToken(forceRefresh: force)
+            }
+            return Dependencies(spotify: spotify, lyrics: store, store: store, demo: DemoPlayback(),
+                                demoLyrics: DemoLyricsProvider(), now: { ProcessInfo.processInfo.systemUptime })
         }
     }
 
-    private let auth = SpotifyAuth.shared
-    private let api = SpotifyAPI()
-    private let repository = LyricsRepository.shared
+    @Published private(set) var snapshot: NowPlayingSnapshot
+    /// A short-lived message after a failed jump to a line.
+    @Published var seekMessage: String?
 
-    private var clock: PlaybackClock?
+    let settings: AppSettings
+    let auth: SpotifyAuth
+    private let deps: Dependencies
+    private var engine: NowPlayingEngine
+
     private var activeClients: Set<String> = []
     private var pollTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var lyricsTask: Task<Void, Never>?
-    private var lyricsFailedAt: TimeInterval?
+    private var prefetchTask: Task<Void, Never>?
     private var pollSoon = false
-    private var lastPollAt: TimeInterval = 0
+    /// Bumped when switching between Spotify and demo, so late answers from the old source are dropped.
+    private var sourceGeneration = 0
+    private var subscriptions: Set<AnyCancellable> = []
 
-    private static let offsetKey = "timingOffset"
-    private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    init(settings: AppSettings, auth: SpotifyAuth, dependencies: Dependencies) {
+        self.settings = settings
+        self.auth = auth
+        self.deps = dependencies
+        let isDemo = settings.demoMode || LaunchOptions.forceDemo
+        engine = NowPlayingEngine(globalOffset: settings.globalOffset, trackOffsets: settings.trackOffsets,
+                                  isSignedIn: auth.isSignedIn, isDemo: isDemo)
+        snapshot = engine.snapshot
 
-    private init() {
-        timingOffset = UserDefaults.standard.double(forKey: Self.offsetKey)
-        snapshot.isSignedIn = auth.isSignedIn
-        Task { [weak self] in
-            for await signedIn in SpotifyAuth.shared.$isSignedIn.values {
-                self?.authChanged(signedIn)
-            }
-        }
+        auth.$isSignedIn
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] signedIn in self?.authChanged(signedIn) }
+            .store(in: &subscriptions)
+        settings.$globalOffset
+            .dropFirst()
+            .sink { [weak self] offset in self?.globalOffsetChanged(offset) }
+            .store(in: &subscriptions)
+        settings.$demoMode
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] demo in self?.setDemo(demo || LaunchOptions.forceDemo) }
+            .store(in: &subscriptions)
     }
+
+    var isDemo: Bool { engine.snapshot.isDemo }
+    private var source: PlaybackSource { isDemo ? deps.demo : deps.spotify }
+    private var lyricsProvider: LyricsProvider { isDemo ? deps.demoLyrics : deps.lyrics }
+    private var canRun: Bool { isDemo || auth.isSignedIn }
+    var isRunning: Bool { pollTask != nil }
+
+    /// Seeking is possible in demo mode, or with the extra Spotify permission turned on.
+    var canSeek: Bool { isDemo || (settings.allowSeeking && auth.canSeek) }
 
     // MARK: Lifecycle
 
-    /// Screens call this when they appear or disappear. Spotify is only polled
-    /// while at least one screen (the iPhone app or CarPlay) is showing.
+    /// Screens and Drive mode call this as they appear and disappear. Spotify
+    /// is only polled while at least one of them is active.
     func setActive(_ active: Bool, client: String) {
         if active {
             activeClients.insert(client)
@@ -76,33 +97,16 @@ final class NowPlayingModel: ObservableObject {
         updateLoops()
     }
 
+    func isActive(client: String) -> Bool { activeClients.contains(client) }
+
+    /// Asks Spotify again right away (pull to refresh, app became active).
     func refreshNow() {
+        engine.noteUserAction(at: deps.now())
         pollSoon = true
     }
 
-    func adjustOffset(by delta: Double) {
-        timingOffset = ((timingOffset + delta) * 20).rounded() / 20
-    }
-
-    /// The estimated playback position including the timing offset.
-    func estimatedPosition() -> TimeInterval? {
-        guard let clock else { return nil }
-        return clock.position(at: Self.now) + timingOffset
-    }
-
-    private func authChanged(_ signedIn: Bool) {
-        guard snapshot.isSignedIn != signedIn else { return }
-        snapshot.isSignedIn = signedIn
-        if !signedIn {
-            clock = nil
-            lyricsTask?.cancel()
-            snapshot = Snapshot(isSignedIn: false)
-        }
-        updateLoops()
-    }
-
     private func updateLoops() {
-        let shouldRun = !activeClients.isEmpty && auth.isSignedIn
+        let shouldRun = !activeClients.isEmpty && canRun
         if shouldRun, pollTask == nil {
             pollTask = Task { [weak self] in await self?.pollLoop() }
             tickTask = Task { [weak self] in await self?.tickLoop() }
@@ -114,99 +118,126 @@ final class NowPlayingModel: ObservableObject {
         }
     }
 
-    // MARK: Polling Spotify
+    private func authChanged(_ signedIn: Bool) {
+        guard !isDemo else { return }
+        if signedIn {
+            engine.setSignedIn(true)
+        } else {
+            cancelWork()
+            engine.setSignedIn(false)
+        }
+        publish()
+        updateLoops()
+        refreshNow()
+    }
+
+    private func setDemo(_ demo: Bool) {
+        guard demo != isDemo else { return }
+        sourceGeneration += 1
+        cancelWork()
+        engine.reset(isSignedIn: auth.isSignedIn, isDemo: demo)
+        publish()
+        // Restart the loops against the new source.
+        pollTask?.cancel()
+        tickTask?.cancel()
+        pollTask = nil
+        tickTask = nil
+        updateLoops()
+    }
+
+    private func globalOffsetChanged(_ offset: Double) {
+        engine.globalOffset = offset
+        engine.tick(at: deps.now())
+        publish()
+    }
+
+    private func cancelWork() {
+        lyricsTask?.cancel()
+        prefetchTask?.cancel()
+        lyricsTask = nil
+        prefetchTask = nil
+    }
+
+    // MARK: Polling
 
     private func pollLoop() async {
         while !Task.isCancelled {
-            let delay = await poll()
-            let deadline = Self.now + delay
+            let delay = await pollOnce()
             pollSoon = false
-            while !Task.isCancelled, !pollSoon, Self.now < deadline {
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            let deadline = deps.now() + delay
+            while !Task.isCancelled, !pollSoon, deps.now() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
     }
 
-    /// Asks Spotify what is playing and returns how long to wait before asking again.
-    private func poll() async -> TimeInterval {
-        lastPollAt = Self.now
+    /// Asks the source what is playing once. Returns how long to wait before asking again.
+    @discardableResult
+    func pollOnce() async -> TimeInterval {
+        let generation = sourceGeneration
+        let source = self.source
+        let start = deps.now()
         do {
-            var token = try await auth.accessToken()
-            var sample: PlaybackSample
-            var start = Self.now
-            do {
-                sample = try await api.currentlyPlaying(accessToken: token)
-            } catch SpotifyAPI.Failure.unauthorized {
-                token = try await auth.accessToken(forceRefresh: true)
-                start = Self.now
-                sample = try await api.currentlyPlaying(accessToken: token)
-            }
-            // Spotify measured the position somewhere during the request; the midpoint is the best guess.
-            let measuredAt = (start + Self.now) / 2
-            apply(sample, measuredAt: measuredAt)
-            snapshot.problem = nil
-            if sample.track == nil { return 6 }
-            return sample.isPlaying ? 3 : 5
-        } catch SpotifyAPI.Failure.rateLimited(let retryAfter) {
-            return max(retryAfter, 3)
-        } catch SpotifyAuthError.notSignedIn {
-            return 10
-        } catch is CancellationError {
-            return 0
+            let sample = try await source.currentlyPlaying()
+            guard generation == sourceGeneration else { return 0 }
+            // The position was measured somewhere during the request; the midpoint is the best guess.
+            let measuredAt = (start + deps.now()) / 2
+            perform(engine.apply(sample, at: measuredAt))
+            publish()
+            return engine.nextPollDelay(at: deps.now())
         } catch {
-            snapshot.problem = "Can't reach Spotify. Retrying…"
-            return 5
+            guard generation == sourceGeneration else { return 0 }
+            let delay = engine.pollFailed(error, at: deps.now())
+            publish()
+            return delay
         }
     }
 
-    private func apply(_ sample: PlaybackSample, measuredAt time: TimeInterval) {
-        guard let track = sample.track else {
-            clock = nil
-            lyricsTask?.cancel()
-            if snapshot.track != nil || snapshot.isPlaying {
-                snapshot.track = nil
-                snapshot.isPlaying = false
-                snapshot.lyrics = .none
-                snapshot.currentLine = nil
-            }
-            return
-        }
-
-        if track.id != snapshot.track?.id {
-            clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
-            snapshot.track = track
-            snapshot.currentLine = nil
-            loadLyrics(for: track)
-        } else {
-            if clock == nil {
-                clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
-            } else {
-                clock?.update(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
-            }
-            if case .failed = snapshot.lyrics, let failedAt = lyricsFailedAt, Self.now - failedAt > 20 {
+    private func perform(_ effects: [NowPlayingEngine.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .loadLyrics(let track):
                 loadLyrics(for: track)
+            case .cancelLyrics:
+                lyricsTask?.cancel()
+                lyricsTask = nil
+            case .prefetchUpcoming:
+                prefetchUpcoming()
             }
         }
-        if snapshot.isPlaying != sample.isPlaying {
-            snapshot.isPlaying = sample.isPlaying
-        }
-        tick()
     }
 
     private func loadLyrics(for track: NowPlayingTrack) {
         lyricsTask?.cancel()
-        lyricsFailedAt = nil
-        snapshot.lyrics = .loading
-        lyricsTask = Task { [weak self, repository] in
+        let provider = lyricsProvider
+        let store = isDemo ? nil : deps.store
+        lyricsTask = Task { [weak self] in
             do {
-                let lyrics = try await repository.lyrics(for: track)
-                guard let self, !Task.isCancelled, self.snapshot.track?.id == track.id else { return }
-                self.snapshot.lyrics = .loaded(lyrics)
-                self.tick()
+                let lyrics = try await provider.lyrics(for: track)
+                let chosen = await store?.isChosenByUser(track) ?? false
+                guard let self, !Task.isCancelled else { return }
+                self.engine.lyricsLoaded(lyrics, for: track.id, chosenByUser: chosen, at: self.deps.now())
+                self.publish()
             } catch {
-                guard let self, !Task.isCancelled, self.snapshot.track?.id == track.id else { return }
-                self.lyricsFailedAt = Self.now
-                self.snapshot.lyrics = .failed("Couldn't load lyrics. Retrying soon.")
+                guard let self, !Task.isCancelled, !(error is CancellationError) else { return }
+                self.engine.lyricsFailed("Couldn't load lyrics", for: track.id, at: self.deps.now())
+                self.publish()
+            }
+        }
+    }
+
+    /// Fetches lyrics for the next couple of songs so they show instantly, even with patchy signal.
+    private func prefetchUpcoming() {
+        guard !isDemo else { return }
+        prefetchTask?.cancel()
+        let source = self.source
+        let provider = lyricsProvider
+        prefetchTask = Task {
+            // Give the current song's lookup a head start.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, let upcoming = try? await source.upcomingTracks() else { return }
+            for track in upcoming.prefix(2) where !Task.isCancelled {
+                _ = try? await provider.lyrics(for: track)
             }
         }
     }
@@ -220,19 +251,110 @@ final class NowPlayingModel: ObservableObject {
         }
     }
 
-    private func tick() {
-        guard let clock else { return }
-        let now = Self.now
-
-        // The song probably changed; don't wait for the next scheduled poll.
-        if clock.hasReachedEnd(at: now), now - lastPollAt > 1.5 {
+    func tick() {
+        let now = deps.now()
+        let changed = engine.tick(at: now)
+        if engine.takeEarlyPoll(at: now) {
+            // The song should have ended; find out what's next without waiting.
             pollSoon = true
         }
+        if changed { publish() }
+    }
 
-        guard case .loaded(.synced(let timeline)) = snapshot.lyrics else { return }
-        let line = timeline.index(at: clock.position(at: now) + timingOffset)
-        if line != snapshot.currentLine {
-            snapshot.currentLine = line
+    private func publish() {
+        let new = engine.snapshot
+        if new != snapshot { snapshot = new }
+    }
+
+    /// The estimated position in the song including timing offsets.
+    func estimatedPosition() -> TimeInterval? {
+        engine.position(at: deps.now())
+    }
+
+    var effectiveOffset: TimeInterval { engine.effectiveOffset }
+
+    // MARK: User actions
+
+    /// Shifts this song's lyrics. Positive shows them earlier.
+    func adjustTrackOffset(by delta: Double) {
+        engine.adjustTrackOffset(by: delta, at: deps.now())
+        settings.trackOffsets = engine.trackOffsets
+        publish()
+    }
+
+    func resetTrackOffset() {
+        engine.resetTrackOffset(at: deps.now())
+        settings.trackOffsets = engine.trackOffsets
+        publish()
+    }
+
+    /// Jumps playback to the start of `line` (iPhone only; never offered in CarPlay).
+    func seek(toLine line: Int) async {
+        guard canSeek, let position = engine.seekPosition(forLine: line) else { return }
+        engine.seekLocally(to: position, at: deps.now())
+        publish()
+        do {
+            try await source.seek(to: position)
+        } catch {
+            seekMessage = (error as? LocalizedError)?.errorDescription ?? "Couldn't jump to that line."
         }
+        refreshNow()
+    }
+
+    /// Demo mode only: play or pause the built-in song.
+    func toggleDemoPlayback() {
+        guard isDemo else { return }
+        deps.demo.setPlaying(!deps.demo.isPlaying)
+        refreshNow()
+    }
+
+    /// Other versions of this song's lyrics on LRCLIB.
+    func lyricCandidates() async throws -> [LRCLibRecord] {
+        guard let track = snapshot.track else { return [] }
+        return try await lyricsProvider.candidates(for: track)
+    }
+
+    func chooseLyrics(_ record: LRCLibRecord) async throws {
+        guard let track = snapshot.track else { return }
+        lyricsTask?.cancel()
+        let lyrics = try await lyricsProvider.choose(record, for: track)
+        engine.lyricsLoaded(lyrics, for: track.id, chosenByUser: !isDemo, at: deps.now())
+        publish()
+    }
+
+    func resetLyricsChoice() async throws {
+        guard let track = snapshot.track else { return }
+        lyricsTask?.cancel()
+        let lyrics = try await lyricsProvider.resetChoice(for: track)
+        engine.lyricsLoaded(lyrics, for: track.id, chosenByUser: false, at: deps.now())
+        publish()
+    }
+
+    func cachedSongCount() async -> Int {
+        await deps.store?.cachedCount() ?? 0
+    }
+
+    func clearLyricsCache() async {
+        await deps.store?.clear()
+        // Reload the current song so the screen isn't left with lyrics that are no longer stored.
+        if let track = snapshot.track, !isDemo {
+            loadLyrics(for: track)
+        }
+    }
+
+    /// "Delete my data": signs out, clears the lyrics cache and every preference.
+    func deleteAllData() async {
+        cancelWork()
+        await deps.store?.clear()
+        settings.deleteAll()
+        auth.signOut()
+        engine = NowPlayingEngine(isSignedIn: false, isDemo: LaunchOptions.forceDemo)
+        sourceGeneration += 1
+        publish()
+        pollTask?.cancel()
+        tickTask?.cancel()
+        pollTask = nil
+        tickTask = nil
+        updateLoops()
     }
 }
