@@ -76,9 +76,14 @@ struct SignInView: View {
                         .foregroundStyle(.secondary)
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Label("Reads what's playing on your Spotify account. Read only.", systemImage: "music.note")
-                        Label("Can't change your playback, or see your playlists or library.", systemImage: "lock")
-                        Label("Song title and artist are sent to LRCLIB to find lyrics. Nothing else leaves your phone.", systemImage: "magnifyingglass")
+                        if settings.allowSeeking {
+                            Label("Reads what's playing on your Spotify account.", systemImage: "music.note")
+                            Label("Can also jump to a line you tap, because you turned that on. Can't see your playlists or library.", systemImage: "hand.tap")
+                        } else {
+                            Label("Reads what's playing on your Spotify account. Read only.", systemImage: "music.note")
+                            Label("Can't change your playback, or see your playlists or library.", systemImage: "lock")
+                        }
+                        Label("Song title, artist, album and length are sent to LRCLIB to find lyrics. Nothing else leaves your phone.", systemImage: "magnifyingglass")
                         Label("Works with Spotify Free and Premium.", systemImage: "checkmark.circle")
                     }
                     .font(.callout)
