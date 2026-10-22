@@ -9,6 +9,9 @@ struct AboutView: View {
                 LabeledContent("Made by", value: AppConfig.publisherName)
                 if let email = AppConfig.supportEmail, let url = URL(string: "mailto:\(email)") {
                     Link(destination: url) { LabeledContent("Support", value: email) }
+                } else {
+                    Link("Contact: open an issue on GitHub", destination: AppConfig.issuesURL)
+                        .accessibilityIdentifier("contactLink")
                 }
                 Link("Source code on GitHub", destination: AppConfig.sourceURL)
             }

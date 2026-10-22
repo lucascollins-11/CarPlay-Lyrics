@@ -193,7 +193,7 @@ final class NowPlayingEngineTests: XCTestCase {
 
         _ = engine.apply(playing(track, at: 10), at: 100)
         XCTAssertEqual(engine.nextPollDelay(at: 100), NowPlayingEngine.fastPollInterval, "just changed")
-        XCTAssertEqual(engine.nextPollDelay(at: 106), 3, "steady")
+        XCTAssertEqual(engine.nextPollDelay(at: 106), NowPlayingEngine.playingPollInterval, "steady")
 
         _ = engine.apply(playing(track, at: 16, playing: false), at: 106)
         XCTAssertEqual(engine.nextPollDelay(at: 106), NowPlayingEngine.fastPollInterval, "pause just happened")
@@ -202,11 +202,22 @@ final class NowPlayingEngineTests: XCTestCase {
         _ = engine.apply(playing(track, at: 58.5), at: 120)
         XCTAssertEqual(engine.nextPollDelay(at: 121), 0.9, accuracy: 0.001, "song about to end")
         XCTAssertEqual(engine.nextPollDelay(at: 121.4), 0.75, "never faster than 0.75 s")
-        XCTAssertEqual(engine.nextPollDelay(at: 126), 3, "sitting at the end: back to normal, early polls are capped separately")
+        XCTAssertEqual(engine.nextPollDelay(at: 126), NowPlayingEngine.playingPollInterval,
+                       "sitting at the end: back to normal, early polls are capped separately")
 
         engine.noteUserAction(at: 200)
         _ = engine.apply(.nothing, at: 200)
         XCTAssertEqual(engine.nextPollDelay(at: 201), 2)
+    }
+
+    func testRateLimitSlowsSteadyPolling() {
+        var engine = loadedEngine(at: 10, time: 100)
+        XCTAssertEqual(engine.nextPollDelay(at: 110), NowPlayingEngine.playingPollInterval)
+        XCTAssertEqual(engine.pollFailed(SpotifyAPIError.rateLimited(retryAfter: 4), at: 110), 4)
+        _ = engine.apply(playing(track, at: 24.2), at: 114.2)
+        XCTAssertEqual(engine.nextPollDelay(at: 120), NowPlayingEngine.rateLimitedPollInterval, "eases off after a 429")
+        XCTAssertEqual(engine.nextPollDelay(at: 110 + NowPlayingEngine.rateLimitCooldown + 1), 1.5, accuracy: 2,
+                       "back to normal later (or the end-of-song shortcut)")
     }
 
     func testEarlyPollsWhenTheSongShouldHaveEndedAreCapped() {
@@ -238,7 +249,7 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertFalse(engine.snapshot.isPlaying, "shown as paused")
         XCTAssertEqual(lines.compactMap { $0 }, lines.compactMap { $0 }.sorted(), "the line never moves backwards")
         XCTAssertEqual(lines.last, 2, "held where the clock had got to")
-        XCTAssertGreaterThanOrEqual(delays.last ?? 0, 3, "no endless fast polling")
+        XCTAssertEqual(delays.last ?? 0, NowPlayingEngine.playingPollInterval, "steady pace, no endless fast polling")
         engine.tick(at: 200)
         XCTAssertEqual(engine.snapshot.currentLine, 2, "frozen while stalled")
 
@@ -248,6 +259,41 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertTrue(engine.snapshot.isPlaying)
         XCTAssertEqual(engine.snapshot.currentLine, 5)
         XCTAssertEqual(engine.nextPollDelay(at: 120), NowPlayingEngine.fastPollInterval)
+    }
+
+    /// Spotify can return the same cached progress for requests about a second apart.
+    func testOneCachedRepeatIsNotAStall() {
+        var engine = loadedEngine(at: 10, time: 100)
+        _ = engine.apply(playing(track, at: 10), at: 101.25)
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertTrue(engine.snapshot.isPlaying, "the Dashboard must not flip to Paused")
+        XCTAssertEqual(engine.position(at: 101.25) ?? 0, 11.25, accuracy: 0.001, "the clock keeps running, no jump back")
+        XCTAssertEqual(engine.nextPollDelay(at: 101.25), NowPlayingEngine.fastPollInterval)
+        // The next answer is fresh again.
+        _ = engine.apply(playing(track, at: 12.5), at: 102.5)
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertEqual(engine.position(at: 102.5) ?? 0, 12.5, accuracy: 0.001)
+    }
+
+    func testTwoQuickRepeatsAreNotAStallEither() {
+        var engine = loadedEngine(at: 10, time: 100)
+        _ = engine.apply(playing(track, at: 10), at: 101)
+        _ = engine.apply(playing(track, at: 10), at: 102)
+        XCTAssertFalse(engine.isStalled, "two repeats within 2.5 s")
+        XCTAssertTrue(engine.snapshot.isPlaying)
+    }
+
+    /// Pinned on purpose: when a stall ends, Spotify's real position wins even if it is behind the held line.
+    func testRecoveringFromAStallFollowsTheRealPositionEvenBackwards() {
+        var engine = loadedEngine(at: 10, time: 100)
+        _ = engine.apply(playing(track, at: 10), at: 103)
+        _ = engine.apply(playing(track, at: 10), at: 106)
+        XCTAssertTrue(engine.isStalled)
+        XCTAssertEqual(engine.snapshot.currentLine, 2, "held at the estimate of 16 s")
+        _ = engine.apply(playing(track, at: 10.5), at: 130)
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertEqual(engine.snapshot.currentLine, 1, "jumps back once to where the device really is")
+        XCTAssertEqual(engine.playbackPosition(at: 130) ?? 0, 10.5, accuracy: 0.001)
     }
 
     func testOrdinaryPlaybackIsNotAStall() {
@@ -277,6 +323,17 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertTrue(engine.needsSignIn)
         engine.setSignedIn(false)
         XCTAssertFalse(engine.needsSignIn)
+    }
+
+    func testTickSleepsUntilTheNextLine() {
+        var engine = loadedEngine(at: 0, time: 100)
+        XCTAssertEqual(engine.nextTickDelay(at: 100), 1, "first line is 2 s away: capped at 1 s")
+        XCTAssertEqual(engine.nextTickDelay(at: 101.5), 0.51, accuracy: 0.001, "wakes just after line 0 starts")
+        engine.tick(at: 101.5)
+        XCTAssertEqual(engine.nextTickDelay(at: 102.0), 1)
+        XCTAssertEqual(engine.nextTickDelay(at: 106.99), 0.02, accuracy: 0.001, "never a busy loop")
+        _ = engine.apply(playing(track, at: 10, playing: false), at: 110)
+        XCTAssertEqual(engine.nextTickDelay(at: 110), 1, "paused: nothing will change")
     }
 
     func testSignOutResets() {

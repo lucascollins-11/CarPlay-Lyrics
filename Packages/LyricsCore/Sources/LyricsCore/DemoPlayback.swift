@@ -47,7 +47,7 @@ public final class DemoPlayback: PlaybackSource, @unchecked Sendable {
     private var startedAt: TimeInterval
     private var pausedAt: TimeInterval?
 
-    public init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    public init(now: @escaping @Sendable () -> TimeInterval = MonotonicClock.now) {
         self.now = now
         self.startedAt = now()
     }

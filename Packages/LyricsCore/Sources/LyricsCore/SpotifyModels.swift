@@ -29,11 +29,19 @@ public struct PlaybackSample: Equatable, Sendable {
     /// Position in seconds.
     public var position: TimeInterval
     public var isPlaying: Bool
+    /// When the HTTP exchange that produced this sample started and ended, on
+    /// the source's monotonic clock. Spotify measured `position` somewhere in
+    /// between. Nil when the source can't tell (the demo song).
+    public var requestStart: TimeInterval?
+    public var requestEnd: TimeInterval?
 
-    public init(track: NowPlayingTrack?, position: TimeInterval, isPlaying: Bool) {
+    public init(track: NowPlayingTrack?, position: TimeInterval, isPlaying: Bool,
+                requestStart: TimeInterval? = nil, requestEnd: TimeInterval? = nil) {
         self.track = track
         self.position = position
         self.isPlaying = isPlaying
+        self.requestStart = requestStart
+        self.requestEnd = requestEnd
     }
 
     /// Nothing is playing (Spotify answers 204 No Content).

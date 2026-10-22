@@ -227,7 +227,30 @@ final class SpotifyWebAPITests: XCTestCase {
     func testNoContentMeansNothingPlaying() async throws {
         let http = StubHTTP { _ in (204, Data(), [:]) }
         let sample = try await makeAPI(http).currentlyPlaying()
-        XCTAssertEqual(sample, .nothing)
+        XCTAssertNil(sample.track)
+        XCTAssertFalse(sample.isPlaying)
+    }
+
+    /// The position is measured during the final HTTP exchange, not while a token was being refreshed.
+    func testTimingCoversOnlyTheFinalExchange() async throws {
+        final class Clock: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: TimeInterval = 0
+            func now() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
+            func advance(_ seconds: TimeInterval) { lock.lock(); value += seconds; lock.unlock() }
+        }
+        let clock = Clock()
+        let http = StubHTTP { _ in
+            clock.advance(0.2)  // the exchange itself
+            return (200, json(#"{"progress_ms":1000,"is_playing":true,"item":{"id":"a","name":"A","duration_ms":5000}}"#), [:])
+        }
+        let api = SpotifyWebAPI(http: http, now: { clock.now() }) { _ in
+            clock.advance(1.0)  // a slow token refresh before it
+            return "token"
+        }
+        let sample = try await api.currentlyPlaying()
+        XCTAssertEqual(sample.requestStart ?? -1, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(sample.requestEnd ?? -1, 1.2, accuracy: 0.0001)
     }
 
     func testRetriesOnceWithFreshTokenAfter401() async throws {

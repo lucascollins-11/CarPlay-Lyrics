@@ -32,3 +32,7 @@ The app is provided "as is", without warranty of any kind. To the extent the law
 ## Changes
 
 These terms may change. The effective date above changes when they do, and the new version ships with the app.
+
+## Contact
+
+Contact: open an issue at https://github.com/lucascollins-11/CarPlay-Lyrics/issues, or use the support email in the app's About screen if one is set.

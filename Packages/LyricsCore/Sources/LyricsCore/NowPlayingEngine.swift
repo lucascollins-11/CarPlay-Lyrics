@@ -77,21 +77,36 @@ public struct NowPlayingEngine: Sendable {
     private var earlyPollsThisTrack = 0
     private var consecutiveFailures = 0
     private var consecutiveUnauthorized = 0
+    private var slowPollingUntil: TimeInterval = 0
     /// The last position Spotify reported while saying it was playing, to notice a frozen position.
     private var lastPlayingPosition: TimeInterval?
     private var lastPlayingAt: TimeInterval?
+    /// How many "playing" samples in a row repeated that position, and when it was first seen.
+    private var repeatCount = 0
+    private var repeatSince: TimeInterval?
     /// Spotify says it is playing but the position stopped moving (the playing device went offline).
     public private(set) var isStalled = false
 
     /// After a change (new song, pause, seek), poll quickly for this long to catch follow-up changes.
     public static let fastPollWindow: TimeInterval = 5
-    public static let fastPollInterval: TimeInterval = 1.25
+    public static let fastPollInterval: TimeInterval = 1
+    /// Steady polling while a song plays. A skip, pause or seek made in the car only shows up at
+    /// the next poll, so this sets how quickly the lyrics follow (at most this plus the round trip).
+    public static let playingPollInterval: TimeInterval = 1.5
+    public static let pausedPollInterval: TimeInterval = 5
+    /// After Spotify said "slow down" (429), poll a song this often for `rateLimitCooldown`.
+    public static let rateLimitedPollInterval: TimeInterval = 3
+    public static let rateLimitCooldown: TimeInterval = 120
     /// How many times to re-poll early while a song sits at its end.
     public static let maxEarlyPolls = 4
+    /// The line only moves back if the position is this far before the current line's start.
+    public static let backwardHysteresis: TimeInterval = 0.3
     /// Consecutive 401s, after a forced token refresh each, before asking the user to sign in again.
     public static let maxUnauthorized = 3
-    /// Two "playing" samples this far apart that report the same position mean playback is stuck.
-    static let stallMinimumGap: TimeInterval = 1
+    /// Spotify can answer back-to-back requests with the same cached position, so a stall
+    /// needs this many repeats in a row, spanning at least `stallMinimumSpan`.
+    static let stallMinimumRepeats = 2
+    static let stallMinimumSpan: TimeInterval = 2.5
     static let stallPositionTolerance: TimeInterval = 0.05
 
     public init(globalOffset: TimeInterval = 0, trackOffsets: [String: TimeInterval] = [:],
@@ -119,6 +134,8 @@ public struct NowPlayingEngine: Sendable {
         consecutiveUnauthorized = 0
         lastPlayingPosition = nil
         lastPlayingAt = nil
+        repeatCount = 0
+        repeatSince = nil
         isStalled = false
     }
 
@@ -129,7 +146,8 @@ public struct NowPlayingEngine: Sendable {
     }
 
     /// Feeds in what Spotify reported, measured at `time` on the monotonic clock.
-    public mutating func apply(_ sample: PlaybackSample, at time: TimeInterval) -> [Effect] {
+    /// - Parameter uncertainty: half the request's round trip; `time` is the request's midpoint.
+    public mutating func apply(_ sample: PlaybackSample, at time: TimeInterval, uncertainty: TimeInterval = 0) -> [Effect] {
         lastSampleAt = time
         consecutiveFailures = 0
         consecutiveUnauthorized = 0
@@ -147,12 +165,15 @@ public struct NowPlayingEngine: Sendable {
             isStalled = false
             lastPlayingPosition = nil
             lastPlayingAt = nil
+            repeatCount = 0
+            repeatSince = nil
             return hadTrack ? [.cancelLyrics] : []
         }
 
         var effects: [Effect] = []
         if track.id != snapshot.track?.id {
-            clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
+            clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration,
+                                  uncertainty: uncertainty)
             snapshot.track = track
             snapshot.currentLine = nil
             snapshot.lyrics = .loading
@@ -161,27 +182,43 @@ public struct NowPlayingEngine: Sendable {
             lyricsFailedAt = nil
             earlyPollsThisTrack = 0
             isStalled = false
+            repeatCount = 0
+            repeatSince = nil
             fastPollUntil = time + Self.fastPollWindow
             effects = [.loadLyrics(track), .prefetchUpcoming]
         } else {
             // Same song: metadata such as artwork can arrive later.
             snapshot.track = track
-            if sample.isPlaying, isFrozen(at: sample.position, time: time) {
-                // Spotify says "playing" but the position hasn't moved. Hold the line where it
-                // is (never jump back) and poll at the normal pace until it moves again.
-                if !isStalled, let current = clock?.position(at: time) {
+            let isRepeat = sample.isPlaying && isRepeatOfLastPosition(sample.position)
+            if isRepeat {
+                repeatCount += 1
+                repeatSince = repeatSince ?? lastPlayingAt
+            } else {
+                repeatCount = 0
+                repeatSince = nil
+            }
+            if isRepeat {
+                // Spotify says "playing" but the position hasn't moved. Once or briefly, that's a
+                // cached answer: keep the clock running and don't re-anchor backwards. If it
+                // persists, the playing device went offline: hold the line where it is (never
+                // jump back) and poll at the normal pace until it moves again.
+                if !isStalled, repeatCount >= Self.stallMinimumRepeats, let since = repeatSince,
+                   time - since >= Self.stallMinimumSpan, let current = clock?.position(at: time) {
                     clock = PlaybackClock(position: current, at: time, isPlaying: false, duration: track.duration)
+                    isStalled = true
                 }
-                isStalled = true
             } else if clock == nil {
                 isStalled = false
-                clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
+                clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration,
+                                  uncertainty: uncertainty)
             } else if isStalled {
                 // Moving again: follow Spotify from here.
                 isStalled = false
-                clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration)
+                clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration,
+                                  uncertainty: uncertainty)
                 fastPollUntil = time + Self.fastPollWindow
-            } else if clock?.update(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration) == true {
+            } else if clock?.update(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration,
+                                    uncertainty: uncertainty) == true {
                 // A pause, resume, seek or repeat: watch closely for a moment.
                 fastPollUntil = time + Self.fastPollWindow
                 if sample.position < 1 { earlyPollsThisTrack = 0 }
@@ -204,9 +241,9 @@ public struct NowPlayingEngine: Sendable {
         return effects
     }
 
-    private func isFrozen(at position: TimeInterval, time: TimeInterval) -> Bool {
-        guard let lastPosition = lastPlayingPosition, let lastAt = lastPlayingAt else { return false }
-        return time - lastAt >= Self.stallMinimumGap && abs(position - lastPosition) <= Self.stallPositionTolerance
+    private func isRepeatOfLastPosition(_ position: TimeInterval) -> Bool {
+        guard let lastPosition = lastPlayingPosition else { return false }
+        return abs(position - lastPosition) <= Self.stallPositionTolerance
     }
 
     /// A poll failed. Returns how long to wait before polling again.
@@ -216,6 +253,7 @@ public struct NowPlayingEngine: Sendable {
         }
         switch error {
         case SpotifyAPIError.rateLimited(let retryAfter):
+            slowPollingUntil = time + Self.rateLimitCooldown
             return max(retryAfter, 3)
         case SpotifyAPIError.forbidden:
             snapshot.problem = SpotifyAPIError.forbidden.errorDescription
@@ -302,6 +340,12 @@ public struct NowPlayingEngine: Sendable {
         guard let timeline = snapshot.timeline, let position = position(at: time) else { return false }
         let line = timeline.index(at: position)
         guard line != snapshot.currentLine else { return false }
+        // A small correction of the clock must not flash the previous line back for a moment.
+        // Real jumps back (seeks, repeats, offset changes) move further than this and still apply.
+        if let current = snapshot.currentLine, (line ?? -1) < current, clock?.isPlaying == true,
+           position > timeline.lines[current].time - Self.backwardHysteresis {
+            return false
+        }
         snapshot.currentLine = line
         return true
     }
@@ -337,12 +381,24 @@ public struct NowPlayingEngine: Sendable {
         return max(0, timeline.lines[line].time - effectiveOffset + 0.05)
     }
 
+    /// How long the app can sleep before the highlighted line may change. Sleeps
+    /// until just after the next line starts, and never more than a second, so
+    /// the end-of-song check still runs. Saves waking the CPU 10 times a second.
+    public func nextTickDelay(at time: TimeInterval) -> TimeInterval {
+        guard let clock, clock.isPlaying, let timeline = snapshot.timeline, let position = position(at: time),
+              let wait = timeline.timeUntilNextLine(after: position)
+        else { return 1 }
+        return min(1, max(0.02, wait + 0.01))
+    }
+
     /// How long to wait before asking Spotify again.
     public func nextPollDelay(at time: TimeInterval) -> TimeInterval {
         guard snapshot.track != nil, let clock else {
             return time < fastPollUntil ? 2 : 6
         }
-        var delay: TimeInterval = clock.isPlaying ? 3 : 5
+        let playingInterval = time < slowPollingUntil ? Self.rateLimitedPollInterval : Self.playingPollInterval
+        // A stalled device shows as paused, but its return should be noticed as fast as a skip.
+        var delay: TimeInterval = clock.isPlaying || isStalled ? playingInterval : Self.pausedPollInterval
         if time < fastPollUntil {
             delay = min(delay, Self.fastPollInterval)
         }

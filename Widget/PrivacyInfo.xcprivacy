@@ -27,7 +27,7 @@
 			</array>
 		</dict>
 		<dict>
-			<!-- ProcessInfo.systemUptime measures elapsed time to follow the song; never leaves the device. -->
+			<!-- A monotonic clock (clock_gettime CLOCK_MONOTONIC) measures time elapsed while a song plays, to follow it; never leaves the device. Declared to be safe even if it is not on the required-reason list. -->
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>

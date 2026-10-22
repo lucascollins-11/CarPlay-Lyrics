@@ -177,7 +177,13 @@ final class PlaybackClockTests: XCTestCase {
     func testIgnoresJitterButFollowsSeeks() {
         var clock = PlaybackClock(position: 10, at: 100, isPlaying: true)
         XCTAssertFalse(clock.update(position: 13.2, at: 103, isPlaying: true))
-        XCTAssertEqual(clock.position(at: 103), 13, accuracy: 0.0001)
+        let blended = clock.position(at: 103)
+        XCTAssertTrue(blended > 13.05 && blended < 13.15, "no jump, but a precise sample moves the clock part of the way (\(blended))")
+        var imprecise = PlaybackClock(position: 10, at: 100, isPlaying: true)
+        XCTAssertFalse(imprecise.update(position: 13.2, at: 103, isPlaying: true, uncertainty: 0.6))
+        XCTAssertEqual(imprecise.position(at: 103), 13, accuracy: 0.01, "a slow request barely moves a precise clock")
+        XCTAssertFalse(imprecise.update(position: 13.5, at: 103, isPlaying: true, uncertainty: 0.6),
+                       "within the round trip's uncertainty: not a seek")
         XCTAssertTrue(clock.update(position: 60, at: 104, isPlaying: true))
         XCTAssertEqual(clock.position(at: 105), 61, accuracy: 0.0001)
         XCTAssertTrue(clock.update(position: 5, at: 106, isPlaying: true), "seeking backwards")

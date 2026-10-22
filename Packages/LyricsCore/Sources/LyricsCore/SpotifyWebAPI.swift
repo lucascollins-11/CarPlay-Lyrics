@@ -43,23 +43,30 @@ public struct SpotifyWebAPI: PlaybackSource {
     public var http: HTTPClient
     public var token: TokenProvider
     public var baseURL: URL
+    /// The clock used to time requests; must match the clock the app follows the song with.
+    public var now: @Sendable () -> TimeInterval
 
-    public init(http: HTTPClient, baseURL: URL = URL(string: "https://api.spotify.com/v1")!, token: @escaping TokenProvider) {
+    public init(http: HTTPClient, baseURL: URL = URL(string: "https://api.spotify.com/v1")!,
+                now: @escaping @Sendable () -> TimeInterval = MonotonicClock.now, token: @escaping TokenProvider) {
         self.http = http
         self.token = token
         self.baseURL = baseURL
+        self.now = now
     }
 
     public func currentlyPlaying() async throws -> PlaybackSample {
-        let (data, status) = try await send("GET", "me/player/currently-playing", query: [URLQueryItem(name: "additional_types", value: "track")])
-        if status == 204 || data.isEmpty { return .nothing }
-        return try PlaybackSample.decode(data)
+        let response = try await send("GET", "me/player/currently-playing", query: [URLQueryItem(name: "additional_types", value: "track")])
+        var sample = response.status == 204 || response.data.isEmpty ? PlaybackSample.nothing : try PlaybackSample.decode(response.data)
+        // Only the final exchange counts: a token refresh or a retry before it says nothing about when Spotify measured.
+        sample.requestStart = response.start
+        sample.requestEnd = response.end
+        return sample
     }
 
     public func upcomingTracks() async throws -> [NowPlayingTrack] {
-        let (data, status) = try await send("GET", "me/player/queue")
-        if status == 204 || data.isEmpty { return [] }
-        return try SpotifyQueue.decode(data)
+        let response = try await send("GET", "me/player/queue")
+        if response.status == 204 || response.data.isEmpty { return [] }
+        return try SpotifyQueue.decode(response.data)
     }
 
     public func seek(to position: TimeInterval) async throws {
@@ -72,7 +79,14 @@ public struct SpotifyWebAPI: PlaybackSource {
     }
 
     /// Sends an authorized request, refreshing the token once on 401.
-    private func send(_ method: String, _ path: String, query: [URLQueryItem] = []) async throws -> (Data, Int) {
+    private struct Response {
+        var data: Data
+        var status: Int
+        var start: TimeInterval
+        var end: TimeInterval
+    }
+
+    private func send(_ method: String, _ path: String, query: [URLQueryItem] = []) async throws -> Response {
         var attempt = 0
         while true {
             let accessToken = try await token(attempt > 0)
@@ -88,10 +102,12 @@ public struct SpotifyWebAPI: PlaybackSource {
                 request.setValue("0", forHTTPHeaderField: "Content-Length")
             }
 
+            let start = now()
             let (data, response) = try await http.send(request)
+            let end = now()
             switch response.statusCode {
             case 200..<300:
-                return (data, response.statusCode)
+                return Response(data: data, status: response.statusCode, start: start, end: end)
             case 401 where attempt == 0:
                 attempt += 1
                 continue

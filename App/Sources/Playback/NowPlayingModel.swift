@@ -27,7 +27,7 @@ final class NowPlayingModel: ObservableObject {
                 try await auth.accessToken(forceRefresh: force)
             }
             return Dependencies(spotify: spotify, lyrics: store, store: store, demo: DemoPlayback(),
-                                demoLyrics: DemoLyricsProvider(), now: { ProcessInfo.processInfo.systemUptime })
+                                demoLyrics: DemoLyricsProvider(), now: MonotonicClock.now)
         }
     }
 
@@ -45,7 +45,12 @@ final class NowPlayingModel: ObservableObject {
     private var tickTask: Task<Void, Never>?
     private var lyricsTask: Task<Void, Never>?
     private var prefetchTask: Task<Void, Never>?
-    private var pollSoon = false
+    /// Set to poll right away instead of waiting out the current delay.
+    private var pollSoon = false {
+        didSet { if pollSoon { pollWait?.cancel() } }
+    }
+    private var pollWait: Task<Void, Never>?
+    private var tickWait: Task<Void, Never>?
     /// Bumped when switching between Spotify and demo, so late answers from the old source are dropped.
     private var sourceGeneration = 0
     private var subscriptions: Set<AnyCancellable> = []
@@ -150,6 +155,7 @@ final class NowPlayingModel: ObservableObject {
         engine.globalOffset = offset
         engine.tick(at: deps.now())
         publish()
+        wakeTick()
     }
 
     private func cancelWork() {
@@ -165,11 +171,21 @@ final class NowPlayingModel: ObservableObject {
         while !Task.isCancelled {
             let delay = await pollOnce()
             pollSoon = false
-            let deadline = deps.now() + delay
-            while !Task.isCancelled, !pollSoon, deps.now() < deadline {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
+            // Sleep the whole delay; refreshNow() and early polls cut it short by cancelling the wait.
+            let wait = Self.sleeper(seconds: delay)
+            pollWait = wait
+            await withTaskCancellationHandler { await wait.value } onCancel: { wait.cancel() }
+            pollWait = nil
         }
+    }
+
+    private static func sleeper(seconds: TimeInterval) -> Task<Void, Never> {
+        Task { try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000)) }
+    }
+
+    /// Re-plans the tick loop's sleep, for example after the clock jumped.
+    private func wakeTick() {
+        tickWait?.cancel()
     }
 
     /// Asks the source what is playing once. Returns how long to wait before asking again.
@@ -181,10 +197,15 @@ final class NowPlayingModel: ObservableObject {
         do {
             let sample = try await source.currentlyPlaying()
             guard generation == sourceGeneration else { return 0 }
-            // The position was measured somewhere during the request; the midpoint is the best guess.
-            let measuredAt = (start + deps.now()) / 2
-            perform(engine.apply(sample, at: measuredAt))
+            // Spotify measured the position somewhere during the HTTP exchange; the midpoint is the
+            // best guess. Use the source's own timing of the final exchange when it has one, so a
+            // token refresh or retry before it doesn't make the lyrics late.
+            let requestStart = sample.requestStart ?? start
+            let requestEnd = sample.requestEnd ?? deps.now()
+            perform(engine.apply(sample, at: (requestStart + requestEnd) / 2,
+                                 uncertainty: max(0, requestEnd - requestStart) / 2))
             publish()
+            wakeTick()
             return engine.nextPollDelay(at: deps.now())
         } catch {
             guard generation == sourceGeneration else { return 0 }
@@ -253,7 +274,11 @@ final class NowPlayingModel: ObservableObject {
     private func tickLoop() async {
         while !Task.isCancelled {
             tick()
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            // Sleep until the next line is due (at most a second) instead of waking 10 times a second.
+            let wait = Self.sleeper(seconds: engine.nextTickDelay(at: deps.now()))
+            tickWait = wait
+            await withTaskCancellationHandler { await wait.value } onCancel: { wait.cancel() }
+            tickWait = nil
         }
     }
 
@@ -269,7 +294,10 @@ final class NowPlayingModel: ObservableObject {
 
     private func publish() {
         let new = engine.snapshot
-        if new != snapshot { snapshot = new }
+        if new != snapshot {
+            snapshot = new
+            wakeTick()
+        }
     }
 
     /// The estimated position in the song including timing offsets.
@@ -299,6 +327,7 @@ final class NowPlayingModel: ObservableObject {
         guard canSeek, let position = engine.seekPosition(forLine: line) else { return }
         engine.seekLocally(to: position, at: deps.now())
         publish()
+        wakeTick()
         do {
             try await source.seek(to: position)
         } catch {

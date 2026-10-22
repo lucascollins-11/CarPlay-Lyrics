@@ -50,4 +50,4 @@ The app contains no third-party SDKs.
 
 ## Changes and contact
 
-If this policy changes, the effective date above changes too, and the new version ships with the app. Questions: see the support contact in the app's About screen.
+If this policy changes, the effective date above changes too, and the new version ships with the app. Contact: open an issue at https://github.com/lucascollins-11/CarPlay-Lyrics/issues, or use the support email in the app's About screen if one is set.

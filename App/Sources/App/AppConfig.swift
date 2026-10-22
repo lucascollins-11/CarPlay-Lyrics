@@ -30,6 +30,7 @@ enum AppConfig {
     }
 
     static let sourceURL = URL(string: "https://github.com/lucascollins-11/CarPlay-Lyrics")!
+    static let issuesURL = sourceURL.appendingPathComponent("issues")
     static let lrclibURL = URL(string: "https://lrclib.net")!
     static let spotifyAppsURL = URL(string: "https://www.spotify.com/account/apps/")!
 
