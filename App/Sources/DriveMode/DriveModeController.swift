@@ -154,7 +154,7 @@ final class DriveModeController: ObservableObject {
         planTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let delay = self?.planAndSend() else { return }
-                let wait = Task { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                let wait = Task { _ = try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
                 self?.planWait = wait
                 await withTaskCancellationHandler { await wait.value } onCancel: { wait.cancel() }
             }
