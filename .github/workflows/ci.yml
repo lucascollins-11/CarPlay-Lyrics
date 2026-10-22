@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Unit tests
         working-directory: Packages/LyricsCore
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
 
   app:
     name: App build, unit and UI tests (Simulator)
@@ -62,8 +62,10 @@ jobs:
       - name: Build for device (unsigned)
         run: |
           set -o pipefail
+          # Zero warnings: the app, widget and LyricsCore targets must build without any.
           xcodebuild build -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
-            -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO | xcbeautify
+            -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES | xcbeautify
 
       - name: Test (unit + UI, demo mode)
         run: |

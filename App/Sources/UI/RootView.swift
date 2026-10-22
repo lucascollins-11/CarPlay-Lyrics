@@ -89,7 +89,7 @@ struct SignInView: View {
                         .padding(.top, 40)
                     Text("Lyrics")
                         .font(.largeTitle.bold())
-                    Text("Time-synced lyrics for the song playing on Spotify, when LRCLIB has them. On iPhone, and on the CarPlay Dashboard with iOS 26.")
+                    Text("Time-synced lyrics for the song playing on Spotify, when LRCLIB has them. On iPhone, and in the CarPlay Dashboard tile with iOS 26 (not over full-screen Maps or Now Playing).")
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
 

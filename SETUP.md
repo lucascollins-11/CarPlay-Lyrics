@@ -89,6 +89,15 @@ Where it shows in the car (Apple's rules, not this app's):
 - Pressing and holding the tile hides it for that drive.
 - Some cars need a firmware update before Live Activities show at all.
 - Live Activities can't be tapped in CarPlay; control music from Spotify as usual.
+- It needs **iOS 26** on the iPhone. On older iOS the lyrics only show in the app.
+- A Focus (Driving Focus, Do Not Disturb) might hide Live Activities on some setups. If the
+  tile is missing, check Settings > Focus > Driving, and see check #17 below.
+
+**Whose music is it?** Lyrics follows the Spotify account you signed in with. If someone
+else controls the music (a passenger's phone, a Spotify Jam, the car's own Spotify app on
+another account), Spotify tells Lyrics about *your* account, not what you can hear. The
+lyrics then belong to whatever your account is playing (or "Nothing playing"). The app
+shows which account is signed in. Nothing in the app can see another account's session.
 
 **Start it automatically:** in the Shortcuts app, Automation > New > CarPlay > Connects >
 Run Immediately, action **Start Drive mode** (from Lyrics). Add a second one for
@@ -127,6 +136,7 @@ These can only be measured on a real iPhone in a real car. Pass/fail thresholds:
 | 14 | Unplug and replug CarPlay (or turn the car off and on) mid-song | The Dashboard line recovers without touching the phone |
 | 15 | A long drive on a hot day, phone in a mount in the sun | Lyrics keep updating; note if iOS shows a temperature warning |
 | 16 | Tune Settings > Drive mode > **Send lines early** until the Dashboard line changes with the singer | Record the value (and the car) in your report |
+| 17 | Turn Driving Focus on, then start Drive mode | The tile still appears on the Dashboard; if it doesn't, record which Focus settings hid it |
 
 If #2 fails (updates throttled), the fallback is to show the next line in advance; tell
 Claude the measured delay.

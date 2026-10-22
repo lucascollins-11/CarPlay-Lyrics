@@ -99,7 +99,6 @@ public struct PlaybackClock: Equatable, Sendable {
     public mutating func update(position: TimeInterval, at time: TimeInterval, isPlaying: Bool, duration: TimeInterval? = nil,
                                 uncertainty: TimeInterval = 0) -> Bool {
         if let duration { self.duration = duration }
-        let duration = self.duration
         let predicted = self.position(at: time)
         let measurementVariance = Self.variance(uncertainty: uncertainty)
         let threshold = max(jitterTolerance, uncertainty + 2 * (anchorVariance + measurementVariance).squareRoot())

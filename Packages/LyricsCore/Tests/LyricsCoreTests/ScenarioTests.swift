@@ -295,7 +295,7 @@ final class RequestTimingTests: XCTestCase {
     /// starting 2.5 s in.
     struct SlowHandshake: HTTPClient {
         let clock: Clock
-        let window: (Date) -> HTTPExchangeWindow?
+        let window: @Sendable (Date) -> HTTPExchangeWindow?
         let body = Data(#"{"progress_ms":1000,"is_playing":true,"item":{"id":"a","name":"A","duration_ms":5000}}"#.utf8)
 
         func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
