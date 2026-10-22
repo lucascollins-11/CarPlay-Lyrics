@@ -117,6 +117,7 @@ final class SpotifyAccountsTests: XCTestCase {
         XCTAssertEqual(request.query["code_challenge"], "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
         XCTAssertEqual(request.query["scope"], "user-read-currently-playing user-read-playback-state")
         XCTAssertEqual(request.query["state"], "s1")
+        XCTAssertEqual(request.query["show_dialog"], "true")
     }
 
     func testCallbackParsing() throws {
