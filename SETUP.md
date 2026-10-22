@@ -1,6 +1,7 @@
 # Setting up CarPlay Lyrics
 
-You need a Mac with Xcode 16 or later and a Spotify account. For lyrics in a real car
+You need a Mac with Xcode 16 or later and a Spotify account. No Mac? See
+[No Mac? Build in GitHub Actions instead](#no-mac-build-in-github-actions-instead). For lyrics in a real car
 you also need an iPhone on **iOS 26** and a CarPlay car. About 20 minutes in total.
 
 ## 1. Generate the Xcode project
@@ -65,6 +66,63 @@ makes it last a year.
 
 No CarPlay entitlement is needed for anything above. (The project only adds the CarPlay
 entitlement to Simulator builds; see step 7.)
+
+### No Mac? Build in GitHub Actions instead
+
+The **iPhone build** workflow (`.github/workflows/iphone.yml`) builds the app on a GitHub
+macOS runner. You skip steps 1, 2 and 4: instead of `Config.xcconfig`, set these under
+the repo's **Settings > Secrets and variables > Actions > Variables**:
+
+| Variable | Value |
+| --- | --- |
+| `SPOTIFY_CLIENT_ID` | the Client ID from step 3 |
+| `BUNDLE_ID_PREFIX` | something unique to you, e.g. `com.lucascollins` |
+| `PUBLISHER_NAME` | your name (shown in About) |
+
+Then **Actions > iPhone build > Run workflow** and pick one of two ways in:
+
+**A. Sideload (free Apple ID works; needs a Windows PC or Mac once a week)**
+
+1. Run the workflow with **sideload**. When it's green, download the
+   `CarPlayLyrics-ipa` artifact from the run page and unzip it to get `CarPlayLyrics.ipa`.
+2. On a Windows PC install iTunes (the apple.com version, not the Microsoft Store one) and
+   [Sideloadly](https://sideloadly.io). Plug in the iPhone, drag the `.ipa` into
+   Sideloadly, enter your Apple ID, press Start.
+3. On the iPhone: Settings > Privacy & Security > **Developer Mode** on (it restarts),
+   then Settings > General > VPN & Device Management > trust your Apple ID.
+
+With a free Apple ID the install stops opening after **7 days** (the app warns you two
+days ahead); run Sideloadly again with the same `.ipa`. A paid account makes it a year.
+
+**B. TestFlight (paid Apple Developer account, $99/year; no computer at all)**
+
+Everything below works from a phone browser or the Apple Developer app.
+
+1. Enroll in the Apple Developer Program (the **Apple Developer** app on iPhone has an
+   Enroll button). Note your **Team ID** (developer.apple.com > Account > Membership).
+2. In [App Store Connect](https://appstoreconnect.apple.com) > Apps > **+ New App**: iOS,
+   any name, bundle ID `<BUNDLE_ID_PREFIX>.carplaylyrics` (if it isn't in the list, add it
+   first at developer.apple.com > Identifiers > **+** > App IDs, and also add
+   `<BUNDLE_ID_PREFIX>.carplaylyrics.widget`), any SKU.
+3. App Store Connect > Users and Access > **Integrations > App Store Connect API** >
+   generate a **Team key** with the **Admin** role (cloud signing needs Admin). Download the
+   `.p8` file (only possible once) and note the **Key ID** and **Issuer ID**.
+4. In the repo add variable `APPLE_TEAM_ID`, and secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`
+   and `ASC_KEY_P8` (open the `.p8` file and paste its whole text, including the
+   `-----BEGIN PRIVATE KEY-----` lines).
+5. Run the workflow with **testflight**. Apple signs the build in the cloud and it goes to
+   TestFlight as an internal build (no App Review).
+6. Install **TestFlight** from the App Store on the iPhone, signed in with the same Apple ID.
+   The build appears there after processing (5 to 30 minutes; App Store Connect may ask
+   you to add yourself to an internal testing group the first time).
+
+TestFlight builds stop opening after **90 days**; run the workflow again for a fresh one.
+Internal TestFlight builds are visible only to your own team, nothing is public.
+
+**CarPlay either way:** neither route can include a CarPlay entitlement, and none is
+needed. In the car the lyrics come through Drive mode's Live Activity on the CarPlay
+Dashboard (step 6), which works the same for sideloaded and TestFlight builds. The
+full-screen CarPlay app (step 7) needs Xcode's Simulator, so it can't be seen without a Mac.
 
 ## 6. Lyrics in the car: Drive mode
 
