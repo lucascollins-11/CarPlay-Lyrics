@@ -91,39 +91,90 @@ public enum TitleNormalizer {
 public struct LRCLibClient: Sendable {
     public var baseURL: URL
     public var userAgent: String
-    public var session: URLSession
+    public var http: HTTPClient
 
     public init(baseURL: URL = URL(string: "https://lrclib.net")!,
-                userAgent: String = "CarPlayLyrics/1.0 (https://github.com/carplay-lyrics)",
-                session: URLSession = .shared) {
+                userAgent: String = "CarPlayLyrics/1.0 (personal iOS app)",
+                http: HTTPClient = URLSession.shared) {
         self.baseURL = baseURL
         self.userAgent = userAgent
-        self.session = session
+        self.http = http
     }
 
     /// Finds the best lyrics for a track.
     ///
     /// Tries an exact signature match first (`/api/get`, which LRCLIB matches
     /// within ±2 seconds of the duration), then the simplified title, then a
-    /// search ranked by `bestMatch`.
+    /// search ranked by `bestMatch`. Each step falls through on errors; this
+    /// throws only if every step failed and nothing at all was found.
     public func lyrics(for track: NowPlayingTrack) async throws -> LRCLibRecord? {
         let simplified = TitleNormalizer.simplify(track.title)
-
-        if let record = try await get(title: track.title, artist: track.primaryArtist, album: track.album, duration: track.duration),
-           record.hasSyncedLyrics {
-            return record
-        }
         var fallback: LRCLibRecord?
-        if simplified != track.title,
-           let record = try await get(title: simplified, artist: track.primaryArtist, album: nil, duration: track.duration) {
+        var lastError: Error?
+
+        func consider(_ record: LRCLibRecord?) -> LRCLibRecord? {
+            guard let record, Self.durationMatches(record, track) else { return nil }
             if record.hasSyncedLyrics { return record }
-            fallback = record
+            // Keep the first plain/instrumental hit in case nothing synced turns up.
+            if fallback == nil, record.hasPlainLyrics || record.instrumental == true { fallback = record }
+            return nil
         }
-        let results = try await search(title: simplified, artist: track.primaryArtist)
-        if let best = Self.bestMatch(in: results, for: track) {
-            return best
+
+        do {
+            if let found = consider(try await get(title: track.title, artist: track.primaryArtist, album: track.album, duration: track.duration)) {
+                return found
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            lastError = error
         }
-        return fallback
+
+        if simplified != track.title {
+            do {
+                if let found = consider(try await get(title: simplified, artist: track.primaryArtist, album: track.album, duration: track.duration)) {
+                    return found
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+
+        do {
+            let results = try await search(title: simplified, artist: track.primaryArtist)
+            if let best = Self.bestMatch(in: results, for: track), best.hasSyncedLyrics || fallback == nil {
+                return best
+            }
+            return fallback
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            lastError = error
+        }
+
+        if let fallback { return fallback }
+        if let lastError { throw lastError }
+        return nil
+    }
+
+    /// LRCLIB's signature match allows ±2 s; anything further apart is another cut of the song.
+    static func durationMatches(_ record: LRCLibRecord, _ track: NowPlayingTrack) -> Bool {
+        guard let duration = record.duration, track.duration > 0 else { return true }
+        return abs(duration - track.duration) <= 3
+    }
+
+    /// Every version LRCLIB has that could belong to `track`, best first,
+    /// for the "choose different lyrics" screen.
+    public func candidates(for track: NowPlayingTrack) async throws -> [LRCLibRecord] {
+        let simplified = TitleNormalizer.simplify(track.title)
+        var results = try await search(title: simplified, artist: track.primaryArtist)
+        if results.isEmpty {
+            // Fall back to a free-text search, which tolerates odd artist credits.
+            results = try await search(query: "\(simplified) \(track.primaryArtist)")
+        }
+        return Self.ranked(results, for: track)
     }
 
     public func get(title: String, artist: String, album: String?, duration: TimeInterval) async throws -> LRCLibRecord? {
@@ -135,63 +186,95 @@ public struct LRCLibClient: Sendable {
         if let album, !album.isEmpty {
             items.append(URLQueryItem(name: "album_name", value: album))
         }
-        let (data, status) = try await request(path: "/api/get", query: items)
+        let (data, status) = try await request(path: "api/get", query: items)
+        if status == 404 { return nil }
+        guard (200..<300).contains(status) else { throw LRCLibError.http(status) }
+        return try JSONDecoder().decode(LRCLibRecord.self, from: data)
+    }
+
+    /// `/api/get/{id}`: a specific record, used when the user picked one by hand.
+    public func get(id: Int) async throws -> LRCLibRecord? {
+        let (data, status) = try await request(path: "api/get/\(id)", query: [])
         if status == 404 { return nil }
         guard (200..<300).contains(status) else { throw LRCLibError.http(status) }
         return try JSONDecoder().decode(LRCLibRecord.self, from: data)
     }
 
     public func search(title: String, artist: String) async throws -> [LRCLibRecord] {
-        let (data, status) = try await request(path: "/api/search", query: [
+        try await searchRequest([
             URLQueryItem(name: "track_name", value: title),
             URLQueryItem(name: "artist_name", value: artist),
         ])
+    }
+
+    public func search(query: String) async throws -> [LRCLibRecord] {
+        try await searchRequest([URLQueryItem(name: "q", value: query)])
+    }
+
+    private func searchRequest(_ items: [URLQueryItem]) async throws -> [LRCLibRecord] {
+        let (data, status) = try await request(path: "api/search", query: items)
         guard (200..<300).contains(status) else { throw LRCLibError.http(status) }
         return try JSONDecoder().decode([LRCLibRecord].self, from: data)
+    }
+
+    /// How well `record` fits `track`, or nil if it is a different song.
+    public static func score(_ record: LRCLibRecord, for track: NowPlayingTrack) -> Double? {
+        let wantedTitle = TitleNormalizer.comparable(TitleNormalizer.simplify(track.title))
+        let wantedArtists = track.artists.map(TitleNormalizer.comparable).filter { !$0.isEmpty }
+
+        let title = TitleNormalizer.comparable(TitleNormalizer.simplify(record.trackName ?? ""))
+        guard !title.isEmpty, !wantedTitle.isEmpty,
+              title == wantedTitle || title.hasPrefix(wantedTitle) || wantedTitle.hasPrefix(title)
+        else { return nil }
+
+        let artist = TitleNormalizer.comparable(record.artistName ?? "")
+        guard !artist.isEmpty, wantedArtists.contains(where: { artist.contains($0) || $0.contains(artist) }) else {
+            return nil
+        }
+        let durationGap = abs((record.duration ?? track.duration) - track.duration)
+        // A different cut of the song (live, extended) has different timings.
+        guard durationGap <= 5 else { return nil }
+
+        var value = 0.0
+        if record.hasSyncedLyrics { value += 100 }
+        else if record.hasPlainLyrics { value += 40 }
+        else if record.instrumental == true { value += 20 }
+        if title == wantedTitle { value += 10 }
+        value -= durationGap * 4
+        return value
     }
 
     /// Picks the search result that best fits the track: same title and
     /// artist, closest duration, and synced lyrics over plain ones.
     public static func bestMatch(in records: [LRCLibRecord], for track: NowPlayingTrack) -> LRCLibRecord? {
-        let wantedTitle = TitleNormalizer.comparable(TitleNormalizer.simplify(track.title))
-        let wantedArtists = track.artists.map(TitleNormalizer.comparable)
-
-        func score(_ record: LRCLibRecord) -> Double? {
-            let title = TitleNormalizer.comparable(TitleNormalizer.simplify(record.trackName ?? ""))
-            guard !title.isEmpty, title == wantedTitle || title.hasPrefix(wantedTitle) || wantedTitle.hasPrefix(title) else {
-                return nil
-            }
-            let artist = TitleNormalizer.comparable(record.artistName ?? "")
-            guard !artist.isEmpty, wantedArtists.contains(where: { !$0.isEmpty && (artist.contains($0) || $0.contains(artist)) }) else {
-                return nil
-            }
-            let durationGap = abs((record.duration ?? 0) - track.duration)
-            // A different cut of the song (live, extended) has different timings.
-            guard record.duration == nil || durationGap <= 5 else { return nil }
-
-            var value = 0.0
-            if record.hasSyncedLyrics { value += 100 }
-            else if record.hasPlainLyrics { value += 40 }
-            else if record.instrumental == true { value += 20 }
-            if title == wantedTitle { value += 10 }
-            value -= durationGap * 4
-            return value
-        }
-
-        return records
-            .compactMap { record in score(record).map { (record, $0) } }
+        records
+            .compactMap { record in score(record, for: track).map { (record, $0) } }
             .max { $0.1 < $1.1 }?
             .0
     }
 
+    /// All records, matching ones first (best first), then the rest in LRCLIB's order.
+    public static func ranked(_ records: [LRCLibRecord], for track: NowPlayingTrack) -> [LRCLibRecord] {
+        let scored = records.enumerated().map { (offset: $0.offset, record: $0.element, score: score($0.element, for: track)) }
+        return scored.sorted { a, b in
+            switch (a.score, b.score) {
+            case let (x?, y?) where x != y: return x > y
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return a.offset < b.offset
+            }
+        }
+        .map(\.record)
+    }
+
     private func request(path: String, query: [URLQueryItem]) async throws -> (Data, Int) {
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-        components.queryItems = query
+        if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
-        let (data, response) = try await session.data(for: request)
-        return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+        let (data, response) = try await http.send(request)
+        return (data, response.statusCode)
     }
 }
 

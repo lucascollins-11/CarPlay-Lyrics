@@ -46,44 +46,32 @@ public struct PlaybackSample: Equatable, Sendable {
     public static func decode(_ data: Data) throws -> PlaybackSample {
         let response = try JSONDecoder().decode(CurrentlyPlayingResponse.self, from: data)
         let position = TimeInterval(response.progress_ms ?? 0) / 1000
-        guard response.currently_playing_type ?? "track" == "track",
-              let item = response.item, let id = item.id
-        else {
-            return PlaybackSample(track: nil, position: position, isPlaying: response.is_playing)
-        }
-        // Use the largest album image.
-        let artwork = item.album?.images?
-            .max { ($0.width ?? 0) < ($1.width ?? 0) }
-            .flatMap { URL(string: $0.url) }
-        let track = NowPlayingTrack(
-            id: id,
-            title: item.name ?? "",
-            artists: item.artists?.map(\.name) ?? [],
-            album: item.album?.name ?? "",
-            duration: TimeInterval(item.duration_ms ?? 0) / 1000,
-            artworkURL: artwork
-        )
-        return PlaybackSample(track: track, position: position, isPlaying: response.is_playing)
+        let isTrack = (response.currently_playing_type ?? "track") == "track"
+        let track = isTrack ? response.item?.track : nil
+        return PlaybackSample(track: track, position: position, isPlaying: response.is_playing ?? false)
+    }
+}
+
+/// `GET /v1/me/player/queue`: the tracks coming up next, used to prefetch lyrics.
+public enum SpotifyQueue {
+    public static func decode(_ data: Data) throws -> [NowPlayingTrack] {
+        let response = try JSONDecoder().decode(QueueResponse.self, from: data)
+        return (response.queue ?? []).compactMap(\.track)
     }
 }
 
 // Field names match Spotify's JSON.
-private struct CurrentlyPlayingResponse: Decodable {
-    var progress_ms: Int?
-    var is_playing: Bool
-    var currently_playing_type: String?
-    var item: Item?
-
-    struct Item: Decodable {
-        var id: String?
-        var name: String?
-        var duration_ms: Int?
-        var artists: [Artist]?
-        var album: Album?
-    }
+struct SpotifyItem: Decodable {
+    var id: String?
+    var type: String?
+    var name: String?
+    var duration_ms: Int?
+    var is_local: Bool?
+    var artists: [Artist]?
+    var album: Album?
 
     struct Artist: Decodable {
-        var name: String
+        var name: String?
     }
 
     struct Album: Decodable {
@@ -96,4 +84,35 @@ private struct CurrentlyPlayingResponse: Decodable {
         var width: Int?
         var height: Int?
     }
+
+    /// Nil for episodes, and for items Spotify gives no ID (some local files).
+    var track: NowPlayingTrack? {
+        guard type == nil || type == "track", let name, !name.isEmpty else { return nil }
+        let artistNames = artists?.compactMap(\.name) ?? []
+        // Local files have no Spotify ID; key them by title and artist so lyrics still cache.
+        let key = id ?? (is_local == true ? "local:\(artistNames.joined(separator: ","))-\(name)" : nil)
+        guard let key else { return nil }
+        let artwork = album?.images?
+            .max { ($0.width ?? 0) < ($1.width ?? 0) }
+            .flatMap { URL(string: $0.url) }
+        return NowPlayingTrack(
+            id: key,
+            title: name,
+            artists: artistNames,
+            album: album?.name ?? "",
+            duration: TimeInterval(duration_ms ?? 0) / 1000,
+            artworkURL: artwork
+        )
+    }
+}
+
+private struct CurrentlyPlayingResponse: Decodable {
+    var progress_ms: Int?
+    var is_playing: Bool?
+    var currently_playing_type: String?
+    var item: SpotifyItem?
+}
+
+private struct QueueResponse: Decodable {
+    var queue: [SpotifyItem]?
 }
