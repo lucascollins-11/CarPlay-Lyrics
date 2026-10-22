@@ -3,6 +3,7 @@ import LyricsCore
 import XCTest
 @testable import CarPlayLyrics
 
+@MainActor
 final class ScopeTests: XCTestCase {
     /// Data minimisation: the default sign-in may only read what's playing.
     func testDefaultScopesAreReadOnly() {
@@ -222,6 +223,7 @@ final class CarPlayTemplateTests: XCTestCase {
     }
 }
 
+@MainActor
 final class BackgroundKeepAliveTests: XCTestCase {
     func testSilentWAVIsWellFormed() {
         let data = BackgroundKeepAlive.silentWAV(sampleRate: 8000)
