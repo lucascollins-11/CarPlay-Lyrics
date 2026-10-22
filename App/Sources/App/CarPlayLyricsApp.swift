@@ -10,6 +10,7 @@ final class AppServices {
     let auth: SpotifyAuth
     let model: NowPlayingModel
     let driveMode: DriveModeController
+    private var networkMonitor: NetworkMonitor?
 
     private init() {
         if LaunchOptions.resetState {
@@ -19,6 +20,10 @@ final class AppServices {
         auth = SpotifyAuth()
         model = NowPlayingModel(settings: settings, auth: auth, dependencies: .live(auth: auth))
         driveMode = DriveModeController(model: model)
+        let model = self.model
+        networkMonitor = NetworkMonitor { model.networkRestored() }
+        // Also on a background-only launch (CarPlay, a Shortcut), not just when the iPhone UI appears.
+        driveMode.restoreIfNeeded()
     }
 
     /// UI tests start from a clean install.
@@ -27,8 +32,8 @@ final class AppServices {
             UserDefaults.standard.removePersistentDomain(forName: domain)
         }
         KeychainTokenStore().delete()
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.removeItem(at: caches.appendingPathComponent("Lyrics"))
+        try? FileManager.default.removeItem(at: AppConfig.lyricsDirectory)
+        try? FileManager.default.removeItem(at: AppConfig.legacyLyricsDirectory)
     }
 }
 

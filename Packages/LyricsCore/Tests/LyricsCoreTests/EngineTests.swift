@@ -98,6 +98,53 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(engine.apply(.nothing, at: 110), [], "no repeated cancel")
     }
 
+    /// Spotify answers "nothing" for a moment around skips and device hand-offs.
+    func testOneEmptyAnswerDoesNotBlankTheLyrics() {
+        var engine = loadedEngine()
+        XCTAssertEqual(engine.apply(.nothing, at: 101.5), [], "kept for now")
+        XCTAssertEqual(engine.snapshot.track, track)
+        XCTAssertNotNil(engine.position(at: 102))
+        XCTAssertEqual(engine.nextPollDelay(at: 101.5), NowPlayingEngine.fastPollInterval, "looks again soon")
+        // The same song comes back: not treated as a new one.
+        XCTAssertEqual(engine.apply(playing(track, at: 2.5), at: 102.5), [])
+        guard case .loaded = engine.snapshot.lyrics else { return XCTFail("lyrics kept") }
+    }
+
+    func testTwoEmptyAnswersInARowClearTheSong() {
+        var engine = loadedEngine()
+        XCTAssertEqual(engine.apply(.nothing, at: 101), [])
+        XCTAssertEqual(engine.apply(.nothing, at: 102), [.cancelLyrics])
+        XCTAssertNil(engine.snapshot.track)
+    }
+
+    func testLongRateLimitIsShown() {
+        var engine = loadedEngine()
+        XCTAssertEqual(engine.pollFailed(SpotifyAPIError.rateLimited(retryAfter: 10), at: 101), 10)
+        XCTAssertNil(engine.snapshot.problem, "a short wait isn't worth mentioning")
+        XCTAssertTrue(engine.isRateLimited(at: 102))
+        XCTAssertEqual(engine.pollFailed(SpotifyAPIError.rateLimited(retryAfter: 600), at: 103), 600, "Retry-After is honoured")
+        XCTAssertEqual(engine.snapshot.problem, "Spotify asked this app to wait 10 min. Song changes will show after that.")
+        XCTAssertTrue(engine.isRateLimited(at: 650))
+        XCTAssertFalse(engine.isRateLimited(at: 800))
+        engine.tick(at: 108)
+        XCTAssertEqual(engine.snapshot.currentLine, 1, "the current song keeps going")
+    }
+
+    func testUnexpectedAnswerHasItsOwnMessage() {
+        var engine = loadedEngine()
+        let error = DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bad"))
+        XCTAssertEqual(engine.pollFailed(error, at: 101), 2)
+        XCTAssertEqual(engine.snapshot.problem, NowPlayingEngine.unexpectedAnswerMessage)
+    }
+
+    func testNetworkRestoredResetsTheBackoff() {
+        var engine = loadedEngine()
+        for _ in 0..<6 { _ = engine.pollFailed(URLError(.notConnectedToInternet), at: 101) }
+        XCTAssertEqual(engine.pollFailed(URLError(.notConnectedToInternet), at: 101), 30)
+        engine.networkRestored(at: 102)
+        XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 103), 2, "starts again from a short wait")
+    }
+
     func testFailedLyricsAreRetriedAfterInterval() {
         var engine = NowPlayingEngine(isSignedIn: true)
         _ = engine.apply(playing(track, at: 0), at: 100)
@@ -238,20 +285,22 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(engine.snapshot.currentLine, 1)
         var lines: [Int?] = [engine.snapshot.currentLine]
         var delays: [TimeInterval] = []
-        for step in 1...3 {
+        // Repeats for 12 s: longer than the grace period for a weak-signal hiccup.
+        for step in 1...4 {
             let time = 100 + Double(step) * 3
             _ = engine.apply(playing(track, at: 10), at: time)
             engine.tick(at: time + 0.5)
             lines.append(engine.snapshot.currentLine)
             delays.append(engine.nextPollDelay(at: time + 0.5))
         }
+        XCTAssertEqual(lines[3], 3, "kept running through the grace period")
         XCTAssertTrue(engine.isStalled)
         XCTAssertFalse(engine.snapshot.isPlaying, "shown as paused")
         XCTAssertEqual(lines.compactMap { $0 }, lines.compactMap { $0 }.sorted(), "the line never moves backwards")
-        XCTAssertEqual(lines.last, 2, "held where the clock had got to")
+        XCTAssertEqual(lines.last, 4, "held where the clock had got to (22 s)")
         XCTAssertEqual(delays.last ?? 0, NowPlayingEngine.playingPollInterval, "steady pace, no endless fast polling")
         engine.tick(at: 200)
-        XCTAssertEqual(engine.snapshot.currentLine, 2, "frozen while stalled")
+        XCTAssertEqual(engine.snapshot.currentLine, 4, "frozen while stalled")
 
         // Playback really moves again (the device is back).
         _ = engine.apply(playing(track, at: 30), at: 120)
@@ -275,6 +324,20 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(engine.position(at: 102.5) ?? 0, 12.5, accuracy: 0.001)
     }
 
+    /// Weak signal: Spotify's server state stops for a few seconds while the phone plays buffered audio.
+    func testShortServerHiccupKeepsTheLyricsRunning() {
+        var engine = loadedEngine(at: 10, time: 100)
+        for time in [101.5, 103.0, 104.5, 106.0, 107.5] {
+            _ = engine.apply(playing(track, at: 10), at: time)
+            XCTAssertTrue(engine.snapshot.isPlaying, "never Paused because of a short hiccup")
+        }
+        XCTAssertFalse(engine.isStalled)
+        XCTAssertEqual(engine.position(at: 107.5) ?? 0, 17.5, accuracy: 0.001, "kept interpolating")
+        // The server catches up: agrees with the clock, no jump.
+        _ = engine.apply(playing(track, at: 19), at: 109)
+        XCTAssertEqual(engine.position(at: 109) ?? 0, 19, accuracy: 0.01)
+    }
+
     func testTwoQuickRepeatsAreNotAStallEither() {
         var engine = loadedEngine(at: 10, time: 100)
         _ = engine.apply(playing(track, at: 10), at: 101)
@@ -288,8 +351,10 @@ final class NowPlayingEngineTests: XCTestCase {
         var engine = loadedEngine(at: 10, time: 100)
         _ = engine.apply(playing(track, at: 10), at: 103)
         _ = engine.apply(playing(track, at: 10), at: 106)
+        XCTAssertFalse(engine.isStalled, "within the grace period")
+        _ = engine.apply(playing(track, at: 10), at: 111)
         XCTAssertTrue(engine.isStalled)
-        XCTAssertEqual(engine.snapshot.currentLine, 2, "held at the estimate of 16 s")
+        XCTAssertEqual(engine.snapshot.currentLine, 3, "held at the estimate of 21 s")
         _ = engine.apply(playing(track, at: 10.5), at: 130)
         XCTAssertFalse(engine.isStalled)
         XCTAssertEqual(engine.snapshot.currentLine, 1, "jumps back once to where the device really is")

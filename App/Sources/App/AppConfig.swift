@@ -31,6 +31,35 @@ enum AppConfig {
 
     static let sourceURL = URL(string: "https://github.com/lucascollins-11/CarPlay-Lyrics")!
     static let issuesURL = sourceURL.appendingPathComponent("issues")
+
+    /// Saved lyrics, including the ones the user picked by hand. Application Support, not Caches,
+    /// because iOS empties Caches when storage runs low and the picks would be lost. Not backed up.
+    static var lyricsDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Lyrics", isDirectory: true)
+    }
+
+    /// Where the first versions kept lyrics.
+    static var legacyLyricsDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Lyrics", isDirectory: true)
+    }
+
+    /// Creates the lyrics folder, moves lyrics saved by earlier versions into it, and keeps it out of backups.
+    static func prepareLyricsDirectory() {
+        let files = FileManager.default
+        var directory = lyricsDirectory
+        try? files.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let old = try? files.contentsOfDirectory(at: legacyLyricsDirectory, includingPropertiesForKeys: nil) {
+            for file in old where file.pathExtension == "json" {
+                try? files.moveItem(at: file, to: directory.appendingPathComponent(file.lastPathComponent))
+            }
+            try? files.removeItem(at: legacyLyricsDirectory)
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? directory.setResourceValues(values)
+    }
     static let lrclibURL = URL(string: "https://lrclib.net")!
     static let spotifyAppsURL = URL(string: "https://www.spotify.com/account/apps/")!
 

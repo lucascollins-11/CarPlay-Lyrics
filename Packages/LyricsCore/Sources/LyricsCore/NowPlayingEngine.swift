@@ -60,6 +60,7 @@ public struct NowPlayingEngine: Sendable {
     }
 
     public static let unreachableMessage = "Can't reach Spotify. Retrying…"
+    public static let unexpectedAnswerMessage = "Spotify sent an answer this app doesn't understand. Retrying…"
 
     public private(set) var snapshot: NowPlayingSnapshot
     public private(set) var clock: PlaybackClock?
@@ -78,6 +79,14 @@ public struct NowPlayingEngine: Sendable {
     private var consecutiveFailures = 0
     private var consecutiveUnauthorized = 0
     private var slowPollingUntil: TimeInterval = 0
+    /// Spotify briefly answers "nothing playing" around skips and device hand-offs.
+    private var emptySamplesInARow = 0
+    private var lastTrackSampleAt: TimeInterval?
+    /// Clear the song only after this many empty answers in a row, or this long without a song.
+    public static let emptySamplesToClear = 2
+    public static let emptyTimeToClear: TimeInterval = 5
+    /// A Retry-After longer than this is shown to the user.
+    public static let longRateLimit: TimeInterval = 30
     /// The last position Spotify reported while saying it was playing, to notice a frozen position.
     private var lastPlayingPosition: TimeInterval?
     private var lastPlayingAt: TimeInterval?
@@ -105,8 +114,10 @@ public struct NowPlayingEngine: Sendable {
     public static let maxUnauthorized = 3
     /// Spotify can answer back-to-back requests with the same cached position, so a stall
     /// needs this many repeats in a row, spanning at least `stallMinimumSpan`.
+    /// Long enough that a weak-signal hiccup in Spotify's own state (while the
+    /// phone keeps playing buffered audio) doesn't freeze the lyrics.
     static let stallMinimumRepeats = 2
-    static let stallMinimumSpan: TimeInterval = 2.5
+    static let stallMinimumSpan: TimeInterval = 10
     static let stallPositionTolerance: TimeInterval = 0.05
 
     public init(globalOffset: TimeInterval = 0, trackOffsets: [String: TimeInterval] = [:],
@@ -137,6 +148,20 @@ public struct NowPlayingEngine: Sendable {
         repeatCount = 0
         repeatSince = nil
         isStalled = false
+        emptySamplesInARow = 0
+        lastTrackSampleAt = nil
+        slowPollingUntil = 0
+    }
+
+    /// True while Spotify's rate limit is in force; skip optional requests such as prefetching.
+    public func isRateLimited(at time: TimeInterval) -> Bool {
+        time < slowPollingUntil
+    }
+
+    /// The network came back: forget the backoff so the next poll goes out now.
+    public mutating func networkRestored(at time: TimeInterval) {
+        consecutiveFailures = 0
+        fastPollUntil = time + Self.fastPollWindow
     }
 
     /// True after Spotify kept rejecting the token even right after a refresh.
@@ -155,6 +180,13 @@ public struct NowPlayingEngine: Sendable {
 
         guard let track = sample.track else {
             let hadTrack = snapshot.track != nil
+            emptySamplesInARow += 1
+            if hadTrack, emptySamplesInARow < Self.emptySamplesToClear,
+               time - (lastTrackSampleAt ?? time) < Self.emptyTimeToClear {
+                // Probably a blip around a skip: keep the song and its clock for now, and look again soon.
+                fastPollUntil = time + Self.fastPollWindow
+                return []
+            }
             clock = nil
             snapshot.track = nil
             snapshot.isPlaying = false
@@ -170,6 +202,8 @@ public struct NowPlayingEngine: Sendable {
             return hadTrack ? [.cancelLyrics] : []
         }
 
+        emptySamplesInARow = 0
+        lastTrackSampleAt = time
         var effects: [Effect] = []
         if track.id != snapshot.track?.id {
             clock = PlaybackClock(position: sample.position, at: time, isPlaying: sample.isPlaying, duration: track.duration,
@@ -253,7 +287,12 @@ public struct NowPlayingEngine: Sendable {
         }
         switch error {
         case SpotifyAPIError.rateLimited(let retryAfter):
-            slowPollingUntil = time + Self.rateLimitCooldown
+            // Honour Retry-After: asking sooner only gets more 429s. The clock keeps the current song going.
+            slowPollingUntil = time + max(Self.rateLimitCooldown, retryAfter)
+            if retryAfter > Self.longRateLimit {
+                let minutes = Int((retryAfter / 60).rounded(.up))
+                snapshot.problem = "Spotify asked this app to wait \(minutes) min. Song changes will show after that."
+            }
             return max(retryAfter, 3)
         case SpotifyAPIError.forbidden:
             snapshot.problem = SpotifyAPIError.forbidden.errorDescription
@@ -265,6 +304,10 @@ public struct NowPlayingEngine: Sendable {
         case SpotifyAuthError.notSignedIn, SpotifyAuthError.tokenRejected:
             // The sign-in layer takes it from here.
             return 10
+        case is DecodingError:
+            consecutiveFailures += 1
+            snapshot.problem = Self.unexpectedAnswerMessage
+            return min(30, pow(2, Double(min(consecutiveFailures, 5))))
         default:
             consecutiveFailures += 1
             snapshot.problem = Self.unreachableMessage

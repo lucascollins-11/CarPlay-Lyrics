@@ -41,6 +41,7 @@ final class DriveModeController: ObservableObject {
 
     /// Re-attaches to a Live Activity left over from a previous launch.
     func restoreIfNeeded() {
+        guard !isRunning else { return }
         let existing = Activity<LyricsActivityAttributes>.activities
         guard !existing.isEmpty else { return }
         if model.settings.driveModeEnabled, let first = existing.first {

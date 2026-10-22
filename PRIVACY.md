@@ -19,7 +19,7 @@ Lyrics ("CarPlay Lyrics", "the app") shows time-synced lyrics for the song playi
 
 ## What stays on your iPhone
 
-- Lyrics you've seen, saved in the app's Caches folder so songs load instantly and offline. iOS may remove them when space is low.
+- Lyrics you've seen, and the versions you picked with "Wrong lyrics?", saved in the app's own storage on this iPhone so songs load instantly and offline. They are excluded from iCloud and computer backups. "Delete my data" removes them.
 - Your settings, such as timing adjustments per song, text size and Drive mode, saved in the app's preferences.
 - While Drive mode is on, a Live Activity with the current lyric line, which iOS shows on the Lock Screen, in the Dynamic Island and on the CarPlay Dashboard.
 

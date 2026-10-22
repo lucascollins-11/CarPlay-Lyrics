@@ -20,9 +20,9 @@ final class NowPlayingModel: ObservableObject {
         var now: @Sendable () -> TimeInterval
 
         static func live(auth: SpotifyAuth) -> Dependencies {
-            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            AppConfig.prepareLyricsDirectory()
             let store = LyricsStore(client: LRCLibClient(userAgent: AppConfig.lrclibUserAgent),
-                                    directory: caches.appendingPathComponent("Lyrics", isDirectory: true))
+                                    directory: AppConfig.lyricsDirectory)
             let spotify = SpotifyWebAPI(http: URLSession.shared) { force in
                 try await auth.accessToken(forceRefresh: force)
             }
@@ -105,6 +105,12 @@ final class NowPlayingModel: ObservableObject {
 
     func isActive(client: String) -> Bool { activeClients.contains(client) }
 
+    /// The network came back after an outage: poll now instead of waiting out the backoff.
+    func networkRestored() {
+        engine.networkRestored(at: deps.now())
+        pollSoon = true
+    }
+
     /// Asks Spotify again right away (pull to refresh, app became active).
     func refreshNow() {
         engine.noteUserAction(at: deps.now())
@@ -169,8 +175,10 @@ final class NowPlayingModel: ObservableObject {
 
     private func pollLoop() async {
         while !Task.isCancelled {
-            let delay = await pollOnce()
+            // Cleared before the request, so a refresh asked for while it runs isn't lost.
             pollSoon = false
+            let delay = await pollOnce()
+            if pollSoon { continue }
             // Sleep the whole delay; refreshNow() and early polls cut it short by cancelling the wait.
             let wait = Self.sleeper(seconds: delay)
             pollWait = wait
@@ -255,7 +263,8 @@ final class NowPlayingModel: ObservableObject {
 
     /// Fetches lyrics for the next couple of songs so they show instantly, even with patchy signal.
     private func prefetchUpcoming() {
-        guard !isDemo else { return }
+        // Prefetching is optional; don't spend Spotify's rate limit on it while it's tight.
+        guard !isDemo, !engine.isRateLimited(at: deps.now()) else { return }
         prefetchTask?.cancel()
         let source = self.source
         let provider = lyricsProvider
