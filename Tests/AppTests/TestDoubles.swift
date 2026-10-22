@@ -75,11 +75,10 @@ final class FakeLyrics: LyricsProvider, @unchecked Sendable {
     var requested: [String] { lock.lock(); defer { lock.unlock() }; return _requested }
 
     func lyrics(for track: NowPlayingTrack) async throws -> Lyrics {
-        lock.lock()
-        _requested.append(track.id)
-        let result = _lyrics[track.id] ?? .notFound
-        let fail = _fail
-        lock.unlock()
+        let (result, fail) = lock.withLock {
+            _requested.append(track.id)
+            return (_lyrics[track.id] ?? .notFound, _fail)
+        }
         if fail { throw URLError(.notConnectedToInternet) }
         return result
     }
@@ -108,7 +107,7 @@ final class StubHTTP: HTTPClient, @unchecked Sendable {
     init(_ handler: @escaping Handler) { self.handler = handler }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        lock.lock(); _count += 1; lock.unlock()
+        lock.withLock { _count += 1 }
         let (status, data) = try await handler(request)
         return (data, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }

@@ -235,8 +235,7 @@ final class BackgroundKeepAliveTests: XCTestCase {
 }
 
 final class DriveModeIdlePolicyTests: XCTestCase {
-    let start = Date(timeIntervalSinceReferenceDate: 0)
-    func at(_ minutes: Double) -> Date { start.addingTimeInterval(minutes * 60) }
+    func at(_ minutes: Double) -> TimeInterval { 1000 + minutes * 60 }
 
     func testNeverStopsWhileConnectedToCarPlay() {
         var policy = DriveModeIdlePolicy()

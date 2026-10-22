@@ -140,7 +140,7 @@ final class NowPlayingEngineTests: XCTestCase {
     func testNetworkRestoredResetsTheBackoff() {
         var engine = loadedEngine()
         for _ in 0..<6 { _ = engine.pollFailed(URLError(.notConnectedToInternet), at: 101) }
-        XCTAssertEqual(engine.pollFailed(URLError(.notConnectedToInternet), at: 101), 30)
+        XCTAssertEqual(engine.pollFailed(URLError(.notConnectedToInternet), at: 101), 8)
         engine.networkRestored(at: 102)
         XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 103), 2, "starts again from a short wait")
     }
@@ -215,7 +215,7 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 104), 4)
         XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 108), 8)
         for _ in 0..<10 { _ = engine.pollFailed(URLError(.timedOut), at: 110) }
-        XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 140), 30, "backoff is capped")
+        XCTAssertEqual(engine.pollFailed(URLError(.timedOut), at: 140), 8, "capped at 8 s: a dead zone looks like a working network (EC29)")
 
         // Lyrics keep following the song through the outage.
         engine.tick(at: 108)

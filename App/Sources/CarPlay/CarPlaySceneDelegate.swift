@@ -15,19 +15,24 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private var lyricsTemplate: CarPlayLyricsTemplate?
     static let client = "carplay"
 
-    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                  didConnect interfaceController: CPInterfaceController) {
-        self.interfaceController = interfaceController
-        let template = CarPlayLyricsTemplate(model: AppServices.shared.model)
-        lyricsTemplate = template
-        interfaceController.setRootTemplate(template.template, animated: false, completion: nil)
+    // CarPlay calls these on the main thread; the protocol just doesn't say so.
+    nonisolated func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
+                                              didConnect interfaceController: CPInterfaceController) {
+        MainActor.assumeIsolated {
+            self.interfaceController = interfaceController
+            let template = CarPlayLyricsTemplate(model: AppServices.shared.model)
+            lyricsTemplate = template
+            interfaceController.setRootTemplate(template.template, animated: false, completion: nil)
+        }
     }
 
-    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                  didDisconnectInterfaceController interfaceController: CPInterfaceController) {
-        AppServices.shared.model.setActive(false, client: Self.client)
-        lyricsTemplate = nil
-        self.interfaceController = nil
+    nonisolated func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
+                                              didDisconnectInterfaceController interfaceController: CPInterfaceController) {
+        MainActor.assumeIsolated {
+            AppServices.shared.model.setActive(false, client: Self.client)
+            lyricsTemplate = nil
+            self.interfaceController = nil
+        }
     }
 
     // Poll Spotify only while the lyrics screen is actually showing in the car,

@@ -55,7 +55,11 @@ public struct SpotifyWebAPI: PlaybackSource {
     }
 
     public func currentlyPlaying() async throws -> PlaybackSample {
-        let response = try await send("GET", "me/player/currently-playing", query: [URLQueryItem(name: "additional_types", value: "track")])
+        let response = try await send("GET", "me/player/currently-playing", query: [
+            URLQueryItem(name: "additional_types", value: "track"),
+            // Answers in the user's market, which drops the long available_markets lists (smaller, faster answers).
+            URLQueryItem(name: "market", value: "from_token"),
+        ])
         var sample = response.status == 204 || response.data.isEmpty ? PlaybackSample.nothing : try PlaybackSample.decode(response.data)
         // Only the final exchange counts: a token refresh or a retry before it says nothing about when Spotify measured.
         sample.requestStart = response.start

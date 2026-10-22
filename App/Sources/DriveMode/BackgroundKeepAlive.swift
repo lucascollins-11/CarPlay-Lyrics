@@ -31,9 +31,17 @@ final class BackgroundKeepAlive {
         let center = NotificationCenter.default
         observers = [
             // A call, Siri or a navigation prompt interrupts every session; pick up again afterwards.
+            // An interruption that "began" only because iOS had suspended the app is already over: resume now.
             center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
                 let rawType = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-                guard rawType == AVAudioSession.InterruptionType.ended.rawValue else { return }
+                let rawReason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+                let ended = rawType == AVAudioSession.InterruptionType.ended.rawValue
+                let wasSuspended = rawReason == AVAudioSession.InterruptionReason.appWasSuspended.rawValue
+                guard ended || wasSuspended else { return }
+                MainActor.assumeIsolated { self?.resume() }
+            },
+            // Plugging in or unplugging CarPlay, Bluetooth or headphones can stop the player.
+            center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.resume() }
             },
             center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
@@ -55,7 +63,17 @@ final class BackgroundKeepAlive {
     private func resume() {
         guard isRunning else { return }
         try? AVAudioSession.sharedInstance().setActive(true)
-        player?.play()
+        if player?.isPlaying != true { player?.play() }
+    }
+
+    /// Checked by Drive mode's heartbeat, in case a stop slipped past the notifications.
+    /// Returns true if the silent player had stopped and was started again.
+    @discardableResult
+    func restartIfStopped() -> Bool {
+        guard isRunning, player?.isPlaying != true else { return false }
+        resume()
+        if player?.isPlaying != true { restart() }
+        return true
     }
 
     private func restart() {

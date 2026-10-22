@@ -20,6 +20,11 @@ public struct PlaybackClock: Equatable, Sendable {
     public private(set) var duration: TimeInterval?
     /// Variance (seconds²) of the estimate at the anchor.
     public private(set) var anchorVariance: Double
+    /// Every sample since the last jump bounds where the music can be: Spotify read the position
+    /// during the request, so it lies within ±(uncertainty + floor) of the midpoint. This is the range
+    /// of `position - time` that all of them allow, which narrows with each sample. Empty means the
+    /// music moved: a slip too small to count as a seek.
+    public private(set) var offsetBounds: ClosedRange<Double>
 
     /// A sample further than this from the prediction (or than its own
     /// uncertainty, if larger) is a real jump: a seek, skip back or repeat.
@@ -27,6 +32,12 @@ public struct PlaybackClock: Equatable, Sendable {
     /// Error that even an instant request has: Spotify's millisecond rounding,
     /// its server's view of a remote device, scheduling on the phone.
     public static let measurementFloor: TimeInterval = 0.02
+    /// How much the estimate's variance grows per second of playback (seconds² per second):
+    /// the device's clock and Spotify's drift apart a little, so old anchors are trusted less.
+    public static let processNoise: Double = 0.005 * 0.005
+    /// How fast the bounds widen (seconds per second): the phone's clock and the device's can drift
+    /// apart slightly, so old samples bound the music less tightly.
+    public static let boundsDrift: Double = 0.002
 
     /// - Parameter uncertainty: half the round trip of the request the position came from.
     public init(position: TimeInterval, at time: TimeInterval, isPlaying: Bool, duration: TimeInterval? = nil,
@@ -36,6 +47,12 @@ public struct PlaybackClock: Equatable, Sendable {
         self.isPlaying = isPlaying
         self.duration = duration
         self.anchorVariance = Self.variance(uncertainty: uncertainty)
+        self.offsetBounds = Self.bounds(position: position, at: time, uncertainty: uncertainty)
+    }
+
+    static func bounds(position: TimeInterval, at time: TimeInterval, uncertainty: TimeInterval) -> ClosedRange<Double> {
+        let halfWidth = uncertainty + measurementFloor
+        return (position - time - halfWidth)...(position - time + halfWidth)
     }
 
     /// The position was measured at an unknown moment within ±`uncertainty`
@@ -73,10 +90,38 @@ public struct PlaybackClock: Equatable, Sendable {
         if isPlaying == self.isPlaying, isPlaying, abs(predicted - position) <= threshold {
             // Blend in, unless the clock sits at the end of the song (the clamp hides how far off it is).
             if self.duration.map({ predicted < $0 }) ?? true {
-                let gain = anchorVariance / (anchorVariance + measurementVariance)
-                anchorPosition = predicted + gain * (position - predicted)
+                // The estimate has aged since the anchor.
+                var variance = anchorVariance + Self.processNoise * max(0, time - anchorTime)
+                // A sample outside what the earlier ones allow means the music really slipped (a buffering
+                // hiccup, a correction on Spotify's side): start again from this sample's bounds and stop
+                // trusting the old estimate, so it is fixed now rather than over many polls.
+                let innovation = position - predicted
+                let aged = max(0, time - anchorTime) * Self.boundsDrift
+                let sampleBounds = Self.bounds(position: position, at: time, uncertainty: uncertainty)
+                let low = max(offsetBounds.lowerBound - aged, sampleBounds.lowerBound)
+                let high = min(offsetBounds.upperBound + aged, sampleBounds.upperBound)
+                if low > high {
+                    offsetBounds = sampleBounds
+                    variance = max(variance, innovation * innovation)
+                } else {
+                    offsetBounds = low...high
+                    if innovation * innovation > 9 * (variance + measurementVariance) {
+                        variance = max(variance, innovation * innovation)
+                    }
+                }
+                let gain = variance / (variance + measurementVariance)
+                // The blend can't leave the range every sample allows.
+                let offset = predicted + gain * innovation - time
+                anchorPosition = min(max(offset, offsetBounds.lowerBound), offsetBounds.upperBound) + time
                 anchorTime = time
-                anchorVariance = anchorVariance * measurementVariance / (anchorVariance + measurementVariance)
+                anchorVariance = variance * measurementVariance / (variance + measurementVariance)
+                // When the samples together pin the music down more tightly than the blend does (several
+                // vague samples from both sides), the middle of the range they allow is the better estimate.
+                let halfWidth = (offsetBounds.upperBound - offsetBounds.lowerBound) / 2
+                if halfWidth * halfWidth / 3 < anchorVariance {
+                    anchorPosition = (offsetBounds.lowerBound + offsetBounds.upperBound) / 2 + time
+                    anchorVariance = halfWidth * halfWidth / 3
+                }
                 // Never fully certain: leaves room for Spotify's own small drifts.
                 anchorVariance += Self.measurementFloor * Self.measurementFloor / 4
             }
@@ -85,6 +130,7 @@ public struct PlaybackClock: Equatable, Sendable {
         anchorPosition = position
         anchorTime = time
         anchorVariance = measurementVariance
+        offsetBounds = Self.bounds(position: position, at: time, uncertainty: uncertainty)
         self.isPlaying = isPlaying
         return true
     }

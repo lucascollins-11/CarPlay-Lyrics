@@ -51,6 +51,15 @@ struct SettingsView: View {
         }
     }
 
+    static func format(_ offset: Double) -> String {
+        offset == 0 ? "0.00 s" : String(format: "%+.2f s", offset)
+    }
+
+    static func spoken(_ offset: Double) -> String {
+        if offset == 0 { return "no adjustment" }
+        return String(format: "%.2f seconds %@", abs(offset), offset > 0 ? "earlier" : "later")
+    }
+
     // MARK: Sections
 
     private var driveSection: some View {
@@ -64,19 +73,28 @@ struct SettingsView: View {
             if let message = driveMode.message {
                 Text(message).font(.footnote).foregroundStyle(.orange)
             }
+            Stepper(value: $settings.dashboardLead, in: 0...2, step: 0.1) {
+                LabeledContent("Send lines early", value: String(format: "%.1f s", settings.dashboardLead))
+            }
+            .accessibilityIdentifier("dashboardLeadStepper")
+            .accessibilityValue(String(format: "%.1f seconds", settings.dashboardLead))
         } header: {
             Text("Drive mode")
         } footer: {
-            Text("Shows the current line as a Live Activity on the Lock Screen and in the Dynamic Island, and on the CarPlay Dashboard with iOS 26. Start it before you drive. It keeps the app running in the background with a silent audio session (Spotify keeps playing), never stops by itself while connected to CarPlay, stops 20 minutes after CarPlay disconnects or after 15 minutes with nothing playing, and iOS ends it after 8 hours. Glance only when it is safe.")
+            Text("Shows the current line as a Live Activity on the CarPlay Dashboard (iOS 26), the Lock Screen and the Dynamic Island. Start it before you drive, or with the Start Drive mode shortcut (for example in a Shortcuts automation for when CarPlay connects). It keeps the app running in the background with a silent audio session (Spotify keeps playing), never stops by itself while connected to CarPlay, stops 20 minutes after CarPlay disconnects or after 15 minutes with nothing playing, and iOS ends it after 8 hours. \"Send lines early\" makes up for the moment the Dashboard takes to update. Glance only when it is safe.")
         }
     }
 
     private var timingSection: some View {
         Section {
-            Stepper(value: $settings.globalOffset, in: -3...3, step: 0.05) {
-                LabeledContent("All songs", value: settings.globalOffset == 0 ? "0.00 s" : String(format: "%+.2f s", settings.globalOffset))
+            let route = model.audioRoute
+            let offset = settings.offset(for: route)
+            Stepper(value: Binding(get: { settings.offset(for: route) }, set: { settings.setOffset($0, for: route) }),
+                    in: -3...3, step: 0.05) {
+                LabeledContent("All songs on \(route.label)", value: Self.format(offset))
             }
             .accessibilityIdentifier("globalOffsetStepper")
+            .accessibilityValue(Self.spoken(offset))
             if !settings.trackOffsets.isEmpty {
                 Button("Reset timing for \(settings.trackOffsets.count) song\(settings.trackOffsets.count == 1 ? "" : "s")") {
                     settings.trackOffsets = [:]
@@ -86,7 +104,7 @@ struct SettingsView: View {
         } header: {
             Text("Timing")
         } footer: {
-            Text("Positive values show lyrics earlier. Car stereos and Bluetooth often add 0.2–0.5 s of delay. Adjust single songs with the − and + buttons under the lyrics.")
+            Text("Positive values show lyrics earlier. Each audio output keeps its own setting, because CarPlay, Bluetooth and the speaker each add a different delay (often 0.1–0.5 s); the one shown is what the iPhone is using now. Adjust single songs with the − and + buttons under the lyrics.")
         }
     }
 

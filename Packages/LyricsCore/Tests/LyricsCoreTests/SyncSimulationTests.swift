@@ -7,7 +7,10 @@ import XCTest
 final class SyncSimulationTests: XCTestCase {
     /// What really plays, as a function of time.
     struct Truth {
-        enum Event { case seek(TimeInterval), pause, resume, skip(NowPlayingTrack), deviceOffline, deviceBack }
+        enum Event { case seek(TimeInterval), pause, resume, skip(NowPlayingTrack), deviceOffline, deviceBack
+            /// The music shifts a little without a seek (a buffering hiccup); not reported as anything.
+            case slip(TimeInterval)
+        }
         var track: NowPlayingTrack
         var position: TimeInterval = 0
         var isPlaying = true
@@ -26,6 +29,7 @@ final class SyncSimulationTests: XCTestCase {
             case .skip(let next): track = next; position = 0
             case .deviceOffline: offline = true
             case .deviceBack: offline = false
+            case .slip(let by): position = max(0, position + by)
             }
         }
     }
@@ -46,6 +50,8 @@ final class SyncSimulationTests: XCTestCase {
         var steadyErrors: [Double] = []
         var backwardMoves: [(time: Double, from: Int, to: Int)] = []
         var detection: [String: Double] = [:]
+        /// Error right after the nth answer that was measured after each slip, by n.
+        var errorAfterPolls: [Int: [Double]] = [:]
     }
 
     let step = 0.01
@@ -67,7 +73,7 @@ final class SyncSimulationTests: XCTestCase {
     }
 
     func run(seed: UInt64, script: [(at: Double, event: Truth.Event)], until end: Double,
-             cachedRepeatChance: Double = 0.1) -> Result {
+             cachedRepeatChance: Double = 0.1, rtt rttRange: ClosedRange<Double>? = nil) -> Result {
         let first = makeTrack(id: "s1", duration: 200)
         let timeline = makeLines(seed: seed, duration: 200)
         var random = SeededRandom(state: seed &+ 99)
@@ -85,6 +91,7 @@ final class SyncSimulationTests: XCTestCase {
         var pendingDetections: [(name: String, since: Double, check: (NowPlayingEngine, Truth) -> Bool)] = []
         var shownLine: Int?
         var allowBackwardUntil = -1.0
+        var slips: [(at: Double, polls: Int)] = []
 
         while now < end {
             // Scripted events.
@@ -115,6 +122,10 @@ final class SyncSimulationTests: XCTestCase {
                     // A stall is held at the clock's estimate; Spotify's real position then wins (pinned elsewhere).
                     allowBackwardUntil = now + detectionLimit
                     pendingDetections.append(("deviceBack@\(Int(now))", now, { engine, _ in engine.snapshot.isPlaying }))
+                case .slip:
+                    // A slip back may move the line back once, which is right.
+                    allowBackwardUntil = now + 4 * detectionLimit
+                    slips.append((now, 0))
                 }
             }
 
@@ -127,11 +138,17 @@ final class SyncSimulationTests: XCTestCase {
                     engine.lyricsLoaded(.synced(timeline), for: track.id, at: now)
                 }
                 lastReported = request.sample
+                for i in slips.indices where request.start >= slips[i].at {
+                    slips[i].polls += 1
+                    if let estimate = engine.position(at: now) {
+                        result.errorAfterPolls[slips[i].polls, default: []].append(abs(estimate - truth.position))
+                    }
+                }
                 nextPollAt = now + engine.nextPollDelay(at: now)
             }
             // A request starting: Spotify reads the position at a random moment during it.
             if inFlight == nil, now >= nextPollAt || engine.takeEarlyPoll(at: now) {
-                let rtt = random.uniform(0.04...maxRTT)
+                let rtt = random.uniform(rttRange ?? 0.04...maxRTT)
                 let measureAt = random.uniform(0...rtt)
                 var future = truth
                 // Peek at the truth at the measuring moment (no events are that close in the scripts).
@@ -161,7 +178,7 @@ final class SyncSimulationTests: XCTestCase {
             shownLine = engine.snapshot.currentLine ?? shownLine
             if engine.snapshot.track?.id != truth.track.id { shownLine = nil }
 
-            if truth.isPlaying, !truth.offline, now - lastEventAt > 5, engine.snapshot.track?.id == truth.track.id,
+            if truth.isPlaying, !truth.offline, now - lastEventAt > 5, slips.allSatisfy({ $0.polls >= 5 }), engine.snapshot.track?.id == truth.track.id,
                let estimate = engine.position(at: now) {
                 result.steadyErrors.append(abs(estimate - truth.position))
             }
@@ -225,5 +242,31 @@ final class SyncSimulationTests: XCTestCase {
         let result = run(seed: 42, script: [], until: 120, cachedRepeatChance: 0.5)
         XCTAssertTrue(result.backwardMoves.isEmpty)
         XCTAssertLessThan(percentile(result.steadyErrors, 0.95), 0.1)
+    }
+
+    /// QA: a slip smaller than the jump threshold must not linger. The music moves 0.2 to 0.25 s
+    /// (either way) without a pause or seek, three times in each of 12 runs.
+    ///
+    /// How fast it can be fixed depends on how precise the answers are: an answer whose round trip is
+    /// longer than twice the slip can't tell slipped from not slipped. On a typical connection (round
+    /// trips up to 300 ms) every answer can, and three answers later the error is under 50 ms almost
+    /// always. On a bad one (up to 800 ms) it is fixed by the first answer precise enough to see it.
+    func testSmallSlipIsCorrectedWithinThreePolls() {
+        let script: [(at: Double, event: Truth.Event)] = [(40, .slip(0.25)), (80, .slip(-0.25)), (120, .slip(0.2))]
+        var fast: [Double] = [], slow: [Double] = []
+        for seed in UInt64(1)...12 {
+            let result = run(seed: seed, script: script, until: 150, cachedRepeatChance: 0, rtt: 0.04...0.3)
+            XCTAssertEqual(result.errorAfterPolls[3]?.count, 3, "seed \(seed)")
+            fast += result.errorAfterPolls[3] ?? []
+            slow += run(seed: seed, script: script, until: 150, cachedRepeatChance: 0).errorAfterPolls[5] ?? []
+        }
+        print(String(format: "slip, fast network, after 3 answers: median %.0f ms, p90 %.0f ms, max %.0f ms",
+                     percentile(fast, 0.5) * 1000, percentile(fast, 0.9) * 1000, (fast.max() ?? 0) * 1000))
+        print(String(format: "slip, slow network, after 5 answers: median %.0f ms, p90 %.0f ms, max %.0f ms",
+                     percentile(slow, 0.5) * 1000, percentile(slow, 0.9) * 1000, (slow.max() ?? 0) * 1000))
+        XCTAssertLessThan(percentile(fast, 0.9), 0.05)
+        XCTAssertLessThan(fast.max() ?? 0, 0.075)
+        XCTAssertLessThan(percentile(slow, 0.5), 0.05)
+        XCTAssertLessThan(slow.max() ?? 0, 0.25, "never worse than the slip itself")
     }
 }

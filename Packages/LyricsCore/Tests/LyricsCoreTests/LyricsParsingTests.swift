@@ -178,7 +178,7 @@ final class PlaybackClockTests: XCTestCase {
         var clock = PlaybackClock(position: 10, at: 100, isPlaying: true)
         XCTAssertFalse(clock.update(position: 13.2, at: 103, isPlaying: true))
         let blended = clock.position(at: 103)
-        XCTAssertTrue(blended > 13.05 && blended < 13.15, "no jump, but a precise sample moves the clock part of the way (\(blended))")
+        XCTAssertEqual(blended, 13.2, accuracy: 0.02, "no jump, but a precise sample that the clock can't explain wins (\(blended))")
         var imprecise = PlaybackClock(position: 10, at: 100, isPlaying: true)
         XCTAssertFalse(imprecise.update(position: 13.2, at: 103, isPlaying: true, uncertainty: 0.6))
         XCTAssertEqual(imprecise.position(at: 103), 13, accuracy: 0.01, "a slow request barely moves a precise clock")

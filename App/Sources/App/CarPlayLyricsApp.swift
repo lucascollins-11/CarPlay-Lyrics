@@ -11,6 +11,7 @@ final class AppServices {
     let model: NowPlayingModel
     let driveMode: DriveModeController
     private var networkMonitor: NetworkMonitor?
+    private var routeMonitor: AudioRouteMonitor?
 
     private init() {
         if LaunchOptions.resetState {
@@ -22,6 +23,7 @@ final class AppServices {
         driveMode = DriveModeController(model: model)
         let model = self.model
         networkMonitor = NetworkMonitor { model.networkRestored() }
+        routeMonitor = AudioRouteMonitor { route in model.setAudioRoute(route) }
         // Also on a background-only launch (CarPlay, a Shortcut), not just when the iPhone UI appears.
         driveMode.restoreIfNeeded()
     }

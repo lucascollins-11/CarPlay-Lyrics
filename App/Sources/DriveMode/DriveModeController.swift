@@ -3,31 +3,38 @@ import AVFoundation
 import Combine
 import Foundation
 import LyricsCore
+import os
 
 /// Drive mode puts the current lyric line in a Live Activity, which iOS 26
 /// shows on the CarPlay Dashboard (and on the Lock Screen and Dynamic Island
 /// everywhere). It keeps the app alive in the background while it runs, and
 /// switches itself off after leaving the car or when nothing has played for a
-/// while (see `DriveModeIdlePolicy`).
+/// while (see `DriveModeIdlePolicy`). What to show and when is decided by
+/// `DashboardPlanner` (lines sent slightly early, throttled, short lines merged).
 @MainActor
 final class DriveModeController: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var message: String?
+    /// False when iOS refused the background audio (Drive mode started from the background):
+    /// the Dashboard line then only updates while Lyrics is open. Retried on every foreground.
+    @Published private(set) var keepsRunningInBackground = false
 
-    /// Minimum time between two Live Activity updates.
-    static let minimumUpdateInterval: TimeInterval = 0.4
+    /// iOS ends a Live Activity after 8 hours; replace it quietly before then when the app is open.
+    static let replaceAfter: TimeInterval = 6 * 60 * 60
+    /// How often to check the keep-alive and the idle policy.
+    static let heartbeatInterval: TimeInterval = 30
 
     private let model: NowPlayingModel
     private let keepAlive = BackgroundKeepAlive()
     private var activity: Activity<LyricsActivityAttributes>?
-    private var subscription: AnyCancellable?
+    private var subscriptions: Set<AnyCancellable> = []
     private var stateTask: Task<Void, Never>?
-    private var updateTask: Task<Void, Never>?
+    private var planTask: Task<Void, Never>?
+    private var planWait: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
-    private var lastSent: LiveLyricsContent?
-    private var pending: LiveLyricsContent?
-    private var lastUpdateAt: Date = .distantPast
+    private var planner = DashboardPlanner()
     private var idlePolicy = DriveModeIdlePolicy()
+    private let log = Logger(subsystem: "CarPlayLyrics", category: "DriveMode")
 
     static let client = "driveMode"
 
@@ -46,23 +53,27 @@ final class DriveModeController: ObservableObject {
         guard !existing.isEmpty else { return }
         if model.settings.driveModeEnabled, let first = existing.first {
             for extra in existing.dropFirst() {
-                Task { await extra.end(nil, dismissalPolicy: .immediate) }
+                Self.end(ActivityBox(extra))
             }
             attach(to: first)
         } else {
             for activity in existing {
-                Task { await activity.end(nil, dismissalPolicy: .immediate) }
+                Self.end(ActivityBox(activity))
             }
         }
     }
 
-    /// Starts Drive mode. Must be called while the app is in the foreground.
-    func start() {
-        guard !isRunning else { return }
+    /// Starts Drive mode. Works in the foreground, and in the background from
+    /// the Start Drive mode shortcut (a LiveActivityIntent). Returns false and
+    /// sets `message` if it couldn't start.
+    @discardableResult
+    func start() -> Bool {
+        guard !isRunning else { return true }
         guard isSupported else {
             message = "Live Activities are turned off for Lyrics. Turn them on in Settings > Lyrics."
-            return
+            return false
         }
+        planner = DashboardPlanner(lead: model.settings.dashboardLead)
         let content = LiveLyricsContent.make(for: model.snapshot, position: model.estimatedPosition())
         do {
             let activity = try Activity.request(
@@ -70,12 +81,12 @@ final class DriveModeController: ObservableObject {
                 content: ActivityContent(state: content, staleDate: staleDate(for: content)),
                 pushType: nil
             )
-            lastSent = content
             attach(to: activity)
             model.settings.driveModeEnabled = true
-            message = nil
+            return isRunning
         } catch {
             message = "Couldn't start Drive mode: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -85,36 +96,77 @@ final class DriveModeController: ObservableObject {
         detach()
         model.settings.driveModeEnabled = false
         if let activity {
-            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+            Self.end(ActivityBox(activity))
+        }
+    }
+
+    /// The app came to the foreground: start the background audio if iOS refused it before, and
+    /// replace an activity that is close to iOS's 8-hour limit.
+    func appBecameActive() {
+        guard isRunning, let activity else { return }
+        if Date().timeIntervalSince(activity.attributes.startedAt) > Self.replaceAfter {
+            stop()
+            start()
+        } else if !keepsRunningInBackground {
+            startKeepAlive()
+        }
+    }
+
+    private func startKeepAlive() {
+        do {
+            try keepAlive.start()
+            keepsRunningInBackground = true
+            message = nil
+        } catch {
+            // Usually: started from the background (a Shortcut, a restored activity), where iOS refuses
+            // to start audio ('!pla'). The Live Activity still shows; opening Lyrics once fixes it.
+            keepsRunningInBackground = false
+            message = "Drive mode is on, but it can only keep the Dashboard up to date after you open Lyrics once."
+            log.error("Keep-alive failed to start: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func attach(to activity: Activity<LyricsActivityAttributes>) {
         self.activity = activity
         isRunning = true
+        message = nil
         idlePolicy = DriveModeIdlePolicy()
-        do {
-            try keepAlive.start()
-        } catch {
-            message = "Drive mode may pause in the background: \(error.localizedDescription)"
-        }
+        planner = DashboardPlanner(lead: model.settings.dashboardLead)
+        startKeepAlive()
         model.setActive(true, client: Self.client)
 
-        subscription = model.$snapshot
+        // Re-plan as soon as anything changes; otherwise the plan loop sleeps until the next line.
+        model.$snapshot
             .removeDuplicates()
-            .sink { [weak self] snapshot in self?.snapshotChanged(snapshot) }
+            .sink { [weak self] _ in self?.planWait?.cancel() }
+            .store(in: &subscriptions)
+        model.settings.$dashboardLead
+            .sink { [weak self] lead in
+                self?.planner.lead = lead
+                self?.planWait?.cancel()
+            }
+            .store(in: &subscriptions)
 
-        // Refresh the stale date during long instrumentals, and check for idling.
+        planTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let delay = self?.planAndSend() else { return }
+                let wait = Task { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                self?.planWait = wait
+                await withTaskCancellationHandler { await wait.value } onCancel: { wait.cancel() }
+            }
+        }
+
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
                 self?.heartbeat()
             }
         }
 
         // Notice when the user or the system (8-hour limit) ends the activity.
+        let box = ActivityBox(activity)
         stateTask = Task { [weak self] in
-            for await state in activity.activityStateUpdates {
+            for await state in box.activity.activityStateUpdates {
                 if state == .ended || state == .dismissed {
                     self?.activityEnded()
                     return
@@ -124,17 +176,18 @@ final class DriveModeController: ObservableObject {
     }
 
     private func detach() {
-        subscription = nil
+        subscriptions.removeAll()
         stateTask?.cancel()
         stateTask = nil
-        updateTask?.cancel()
-        updateTask = nil
+        planTask?.cancel()
+        planTask = nil
+        planWait?.cancel()
+        planWait = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
         activity = nil
-        lastSent = nil
-        pending = nil
         keepAlive.stop()
+        keepsRunningInBackground = false
         model.setActive(false, client: Self.client)
         isRunning = false
     }
@@ -145,6 +198,18 @@ final class DriveModeController: ObservableObject {
         message = "Drive mode ended. Start it again before your next drive."
     }
 
+    /// Sends what the planner says, and returns how long to sleep. Nil once Drive mode stopped.
+    private func planAndSend() -> TimeInterval? {
+        guard isRunning, let activity else { return nil }
+        let snapshot = model.snapshot
+        guard !stopIfIdle(snapshot) else { return nil }
+        let plan = planner.plan(snapshot: snapshot, position: model.estimatedPosition(), now: MonotonicClock.now())
+        if let content = plan.send {
+            Self.update(ActivityBox(activity), content: content, staleDate: staleDate(for: content))
+        }
+        return plan.wakeAfter
+    }
+
     /// Switches off when the policy says so, or right away after signing out. Returns true if it stopped.
     private func stopIfIdle(_ snapshot: NowPlayingSnapshot) -> Bool {
         if !snapshot.isSignedIn, !snapshot.isDemo {
@@ -153,7 +218,7 @@ final class DriveModeController: ObservableObject {
             return true
         }
         let playing = snapshot.track != nil && snapshot.isPlaying
-        if idlePolicy.shouldStop(isPlaying: playing, inCar: Self.isConnectedToCar, now: Date()) {
+        if idlePolicy.shouldStop(isPlaying: playing, inCar: Self.isConnectedToCar, now: MonotonicClock.now()) {
             let leftCar = idlePolicy.leftCarAt != nil
             stop()
             message = leftCar ? "Drive mode stopped a while after CarPlay disconnected." : "Drive mode stopped because nothing was playing."
@@ -168,56 +233,50 @@ final class DriveModeController: ObservableObject {
     }
 
     private func heartbeat() {
-        let snapshot = model.snapshot
-        guard !stopIfIdle(snapshot) else { return }
-        pending = LiveLyricsContent.make(for: snapshot, position: model.estimatedPosition())
-        scheduleUpdate()
-    }
-
-    private func snapshotChanged(_ snapshot: NowPlayingSnapshot) {
-        guard !stopIfIdle(snapshot) else { return }
-        let content = LiveLyricsContent.make(for: snapshot, position: model.estimatedPosition())
-        if let lastSent, lastSent.showsSameText(as: content) { return }
-        pending = content
-        scheduleUpdate()
-    }
-
-    /// Sends the newest content, at most once per `minimumUpdateInterval`.
-    private func scheduleUpdate() {
-        guard updateTask == nil else { return }
-        let wait = max(0, Self.minimumUpdateInterval - Date().timeIntervalSince(lastUpdateAt))
-        updateTask = Task { [weak self] in
-            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
-            guard let self, !Task.isCancelled else { return }
-            self.updateTask = nil
-            guard let activity = self.activity, let content = self.pending else { return }
-            self.pending = nil
-            self.lastSent = content
-            self.lastUpdateAt = Date()
-            await activity.update(ActivityContent(state: content, staleDate: self.staleDate(for: content)))
+        guard isRunning else { return }
+        if keepAlive.restartIfStopped() {
+            log.notice("Keep-alive audio had stopped; restarted it")
         }
+        planWait?.cancel()
     }
 
-    /// If updates stop arriving (the app was suspended), iOS greys the line out instead of showing a stale one.
+    /// If updates stop arriving (the app was suspended), iOS marks the activity stale and the widget says so.
     private func staleDate(for content: LiveLyricsContent) -> Date {
         Date().addingTimeInterval(content.isPlaying ? 45 : 15 * 60)
+    }
+
+    // MARK: ActivityKit calls
+
+    /// `Activity` isn't Sendable; it is only ever touched from these helpers and the main actor.
+    struct ActivityBox: @unchecked Sendable {
+        let activity: Activity<LyricsActivityAttributes>
+        init(_ activity: Activity<LyricsActivityAttributes>) { self.activity = activity }
+    }
+
+    nonisolated private static func update(_ box: ActivityBox, content: LiveLyricsContent, staleDate: Date) {
+        Task { await box.activity.update(ActivityContent(state: content, staleDate: staleDate)) }
+    }
+
+    nonisolated private static func end(_ box: ActivityBox) {
+        Task { await box.activity.end(nil, dismissalPolicy: .immediate) }
     }
 }
 
 /// When Drive mode switches itself off. Never while connected to CarPlay, so a
 /// stop for fuel or coffee doesn't end it; otherwise after a stretch with nothing
 /// playing, or a while after leaving the car even if music carries on in headphones.
+/// Times are monotonic seconds, so a change of the phone's clock can't trigger it.
 struct DriveModeIdlePolicy {
     /// Not in the car and nothing playing for this long.
     static let idleTimeout: TimeInterval = 15 * 60
     /// This long after CarPlay disconnects, whatever is playing.
     static let afterCarTimeout: TimeInterval = 20 * 60
 
-    private(set) var idleSince: Date?
-    private(set) var leftCarAt: Date?
+    private(set) var idleSince: TimeInterval?
+    private(set) var leftCarAt: TimeInterval?
     private var wasInCar = false
 
-    mutating func shouldStop(isPlaying: Bool, inCar: Bool, now: Date) -> Bool {
+    mutating func shouldStop(isPlaying: Bool, inCar: Bool, now: TimeInterval) -> Bool {
         if inCar {
             wasInCar = true
             leftCarAt = nil
@@ -228,7 +287,7 @@ struct DriveModeIdlePolicy {
             wasInCar = false
             leftCarAt = now
         }
-        if let leftCarAt, now.timeIntervalSince(leftCarAt) >= Self.afterCarTimeout {
+        if let leftCarAt, now - leftCarAt >= Self.afterCarTimeout {
             return true
         }
         if isPlaying {
@@ -237,6 +296,6 @@ struct DriveModeIdlePolicy {
         }
         let since = idleSince ?? now
         idleSince = since
-        return now.timeIntervalSince(since) >= Self.idleTimeout
+        return now - since >= Self.idleTimeout
     }
 }

@@ -221,6 +221,7 @@ final class SpotifyWebAPITests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertEqual(request.path, "/v1/me/player/currently-playing")
         XCTAssertEqual(request.query["additional_types"], "track")
+        XCTAssertEqual(request.query["market"], "from_token")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer stale")
     }
 

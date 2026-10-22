@@ -32,6 +32,8 @@ final class NowPlayingModel: ObservableObject {
     }
 
     @Published private(set) var snapshot: NowPlayingSnapshot
+    /// The phone's current audio output (see `AudioRouteMonitor`).
+    @Published private(set) var audioRoute: AudioRouteKind = .speaker
     /// A short-lived message after a failed jump to a line.
     @Published var seekMessage: String?
 
@@ -60,7 +62,7 @@ final class NowPlayingModel: ObservableObject {
         self.auth = auth
         self.deps = dependencies
         let isDemo = settings.demoMode || LaunchOptions.forceDemo
-        engine = NowPlayingEngine(globalOffset: settings.globalOffset, trackOffsets: settings.trackOffsets,
+        engine = NowPlayingEngine(globalOffset: settings.offset(for: .speaker), trackOffsets: settings.trackOffsets,
                                   isSignedIn: auth.isSignedIn, isDemo: isDemo)
         snapshot = engine.snapshot
 
@@ -69,9 +71,10 @@ final class NowPlayingModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] signedIn in self?.authChanged(signedIn) }
             .store(in: &subscriptions)
-        settings.$globalOffset
+        // The new values come with the event (the properties still hold the old ones while sinks run).
+        settings.$globalOffset.combineLatest(settings.$routeOffsets, $audioRoute)
             .dropFirst()
-            .sink { [weak self] offset in self?.globalOffsetChanged(offset) }
+            .sink { [weak self] global, routes, route in self?.globalOffsetChanged(routes[route.rawValue] ?? global) }
             .store(in: &subscriptions)
         settings.$demoMode
             .dropFirst()
@@ -157,7 +160,13 @@ final class NowPlayingModel: ObservableObject {
         updateLoops()
     }
 
+    /// Which audio output the phone uses now; picks the timing adjustment for it.
+    func setAudioRoute(_ route: AudioRouteKind) {
+        if route != audioRoute { audioRoute = route }
+    }
+
     private func globalOffsetChanged(_ offset: Double) {
+        guard offset != engine.globalOffset else { return }
         engine.globalOffset = offset
         engine.tick(at: deps.now())
         publish()
@@ -392,7 +401,7 @@ final class NowPlayingModel: ObservableObject {
         await deps.store?.clear()
         settings.deleteAll()
         auth.signOut()
-        engine = NowPlayingEngine(isSignedIn: false, isDemo: LaunchOptions.forceDemo)
+        engine = NowPlayingEngine(globalOffset: settings.offset(for: audioRoute), isSignedIn: false, isDemo: LaunchOptions.forceDemo)
         sourceGeneration += 1
         publish()
         pollTask?.cancel()

@@ -93,19 +93,23 @@ struct LyricsActivityView: View {
 }
 
 struct LyricLinesView: View {
+    static let staleText = "Lyrics paused"
     let content: LiveLyricsContent
     let isStale: Bool
     let compact: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 1 : 4) {
-            Text(content.current)
+            // When updates stopped arriving (the app was closed or suspended), an old lyric would look like
+            // a sync bug, so say so plainly instead. No instructions: this can be on the CarPlay screen.
+            let current = isStale ? Self.staleText : content.current
+            Text(current)
                 .font(compact ? .headline : .title3.weight(.bold))
-                .foregroundStyle(isStale ? .white.opacity(0.6) : .white)
+                .foregroundStyle(isStale ? .white.opacity(0.75) : .white)
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
-                .accessibilityLabel(content.current == LyricsDisplay.gapText ? "Instrumental break" : content.current)
-            if let next = content.next {
+                .accessibilityLabel(current == LyricsDisplay.gapText ? "Instrumental break" : current)
+            if !isStale, let next = content.next {
                 Text(next)
                     .font(compact ? .caption : .callout)
                     .foregroundStyle(.white.opacity(0.7))

@@ -1,10 +1,11 @@
 import XCTest
 
 /// End-to-end checks of the iPhone app in demo mode (no Spotify account needed).
+@MainActor
 final class CarPlayLyricsUITests: XCTestCase {
     var app: XCUIApplication!
 
-    override func setUp() {
+    override func setUp() async throws {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = ["-uiTesting", "-resetState", "-demo"]
@@ -94,9 +95,10 @@ final class CarPlayLyricsUITests: XCTestCase {
         app.swipeUp()
         app.swipeUp()
         app.buttons["deleteDataButton"].tap()
-        let confirm = app.buttons["Delete all data"]
+        // The dialog can expose its action more than once; the identifier picks the button itself.
+        let confirm = app.buttons["confirmDeleteData"].firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Cancel"].exists, "a plain way out")
+        XCTAssertTrue(app.buttons["Cancel"].firstMatch.exists, "a plain way out")
         confirm.tap()
         XCTAssertTrue(app.alerts["Your data was deleted"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.alerts.buttons["Open Spotify account settings"].exists)

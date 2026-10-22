@@ -12,6 +12,8 @@ final class AppSettings: ObservableObject {
         case driveModeEnabled
         case allowSeeking
         case lyricsTextSize
+        case routeOffsets
+        case dashboardLead
         /// Written by the first version of the app.
         case legacyTimingOffset = "timingOffset"
     }
@@ -40,6 +42,20 @@ final class AppSettings: ObservableObject {
     /// Tap a lyric line on the iPhone to jump there (needs an extra Spotify permission and Premium).
     @Published var allowSeeking: Bool { didSet { defaults.set(allowSeeking, forKey: Key.allowSeeking.rawValue) } }
     @Published var lyricsTextSize: TextSize { didSet { defaults.set(lyricsTextSize.rawValue, forKey: Key.lyricsTextSize.rawValue) } }
+    /// Timing for all songs per kind of audio output (car, Bluetooth, speaker…), since each adds its own delay.
+    /// Routes without an entry use `globalOffset`.
+    @Published var routeOffsets: [String: Double] { didSet { defaults.set(routeOffsets, forKey: Key.routeOffsets.rawValue) } }
+    /// How early Drive mode sends each line, to make up for the time a Live Activity takes to show.
+    @Published var dashboardLead: Double { didSet { defaults.set(dashboardLead, forKey: Key.dashboardLead.rawValue) } }
+    static let defaultDashboardLead = 0.3
+
+    func offset(for route: AudioRouteKind) -> Double {
+        routeOffsets[route.rawValue] ?? globalOffset
+    }
+
+    func setOffset(_ value: Double, for route: AudioRouteKind) {
+        routeOffsets[route.rawValue] = (value * 20).rounded() / 20
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -56,6 +72,8 @@ final class AppSettings: ObservableObject {
         driveModeEnabled = defaults.bool(forKey: Key.driveModeEnabled.rawValue)
         allowSeeking = defaults.bool(forKey: Key.allowSeeking.rawValue)
         lyricsTextSize = TextSize(rawValue: defaults.string(forKey: Key.lyricsTextSize.rawValue) ?? "") ?? .standard
+        routeOffsets = defaults.dictionary(forKey: Key.routeOffsets.rawValue) as? [String: Double] ?? [:]
+        dashboardLead = defaults.object(forKey: Key.dashboardLead.rawValue) as? Double ?? Self.defaultDashboardLead
     }
 
     /// Removes every stored preference and resets the published values.
@@ -70,6 +88,8 @@ final class AppSettings: ObservableObject {
         driveModeEnabled = false
         allowSeeking = false
         lyricsTextSize = .standard
+        routeOffsets = [:]
+        dashboardLead = Self.defaultDashboardLead
         // The didSet observers wrote defaults back; remove them again so nothing is left behind.
         for key in Key.allCases {
             defaults.removeObject(forKey: key.rawValue)

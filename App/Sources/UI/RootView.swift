@@ -6,6 +6,7 @@ struct RootView: View {
     @EnvironmentObject private var auth: SpotifyAuth
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var model: NowPlayingModel
+    @EnvironmentObject private var driveMode: DriveModeController
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -21,7 +22,10 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.setActive(phase == .active, client: "phone")
-            if phase == .active { model.refreshNow() }
+            if phase == .active {
+                model.refreshNow()
+                driveMode.appBecameActive()
+            }
             updateIdleTimer()
         }
         .onChange(of: settings.keepScreenAwake) { _, _ in updateIdleTimer() }

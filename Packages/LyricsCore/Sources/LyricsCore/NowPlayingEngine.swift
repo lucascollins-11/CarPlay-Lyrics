@@ -87,6 +87,8 @@ public struct NowPlayingEngine: Sendable {
     public static let emptyTimeToClear: TimeInterval = 5
     /// A Retry-After longer than this is shown to the user.
     public static let longRateLimit: TimeInterval = 30
+    /// Longest wait after a request that didn't get through (no signal, timeout).
+    public static let maxTransportBackoff: TimeInterval = 8
     /// The last position Spotify reported while saying it was playing, to notice a frozen position.
     private var lastPlayingPosition: TimeInterval?
     private var lastPlayingAt: TimeInterval?
@@ -311,8 +313,11 @@ public struct NowPlayingEngine: Sendable {
         default:
             consecutiveFailures += 1
             snapshot.problem = Self.unreachableMessage
-            // 2, 4, 8, 16, 30, 30… seconds. The clock keeps running so lyrics carry on through short drop-outs.
-            return min(30, pow(2, Double(min(consecutiveFailures, 5))))
+            // 2, 4, 8, 8… seconds. The clock keeps running so lyrics carry on through short drop-outs.
+            // Kept short because the app only polls while something shows lyrics, and in a dead zone
+            // the phone still reports a network (so no "network is back" signal comes): the next
+            // working poll must not be far off once the car is out of it.
+            return min(Self.maxTransportBackoff, pow(2, Double(min(consecutiveFailures, 5))))
         }
     }
 
