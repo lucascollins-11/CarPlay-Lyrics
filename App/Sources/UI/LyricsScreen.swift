@@ -18,7 +18,7 @@ struct LyricsScreen: View {
                     LyricsFooter(snapshot: snapshot, showPicker: $showPicker)
                 } else {
                     Spacer()
-                    NothingPlayingView(problem: snapshot.problem)
+                    NothingPlayingView(problem: snapshot.problem, away: snapshot.notASongText)
                     Spacer()
                 }
                 if let problem = snapshot.problem, snapshot.track != nil {
@@ -66,14 +66,19 @@ struct LyricsScreen: View {
 
 private struct NothingPlayingView: View {
     let problem: String?
+    /// A podcast or ad rather than nothing.
+    var away: (title: String, subtitle: String)?
     @EnvironmentObject private var model: NowPlayingModel
 
     var body: some View {
         ContentUnavailableView {
-            Label(problem == nil ? "Nothing playing" : "Can't reach Spotify", systemImage: problem == nil ? "music.note" : "wifi.exclamationmark")
+            Label(problem == nil ? (away?.title ?? "Nothing playing") : "Can't reach Spotify",
+                  systemImage: problem == nil ? "music.note" : "wifi.exclamationmark")
         } description: {
             if let problem {
                 Text(problem)
+            } else if let away {
+                Text(away.subtitle)
             } else {
                 Text("Play a song on Spotify, on this iPhone or any other device. Podcasts, Private Sessions and local files without details don't show lyrics.")
             }

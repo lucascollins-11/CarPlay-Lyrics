@@ -37,6 +37,9 @@ public enum LyricsDisplay: Equatable, Sendable {
             if snapshot.problem != nil {
                 return .message(title: "Can't reach Spotify", subtitle: "Lyrics will appear when the connection is back.")
             }
+            if let away = snapshot.notASongText {
+                return .message(title: away.title, subtitle: away.subtitle)
+            }
             return .message(title: "Nothing playing", subtitle: "Play a song on Spotify to see its lyrics.")
         }
         let header = track.artistLine.isEmpty ? track.title : "\(track.title) · \(track.artistLine)"
@@ -109,6 +112,10 @@ public struct LiveLyricsContent: Codable, Hashable, Sendable {
                 return LiveLyricsContent(title: "Lyrics", artist: "", current: "Spotify isn't connected", next: nil,
                                          isPlaying: false, position: 0, duration: 0)
             }
+            if let away = snapshot.notASongText {
+                return LiveLyricsContent(title: "Lyrics", artist: "", current: away.title, next: nil,
+                                         isPlaying: false, position: 0, duration: 0)
+            }
             return .idle
         }
         var current: String
@@ -164,5 +171,17 @@ public enum LineSplitter {
         }
         let rest = words[index...].joined(separator: " ")
         return (first, rest.isEmpty ? nil : rest)
+    }
+}
+
+extension NowPlayingSnapshot {
+    /// What to say while Spotify plays something that has no lyrics here (EC36).
+    public var notASongText: (title: String, subtitle: String)? {
+        switch playingKind {
+        case .episode: return ("Spotify is playing a podcast", "Lyrics show for songs.")
+        case .ad: return ("Spotify is playing an ad", "Lyrics come back with the next song.")
+        case .unknown: return ("Spotify isn't sharing what's playing", "A Private Session or some local files hide the song.")
+        case .nothing, .track: return nil
+        }
     }
 }

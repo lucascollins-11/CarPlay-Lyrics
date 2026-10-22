@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var cachedSongs = 0
     @State private var confirmDelete = false
     @State private var confirmSignOut = false
+    @State private var profile: SpotifyProfile?
     @State private var deleted = false
     @State private var authMessage: String?
 
@@ -122,7 +123,8 @@ struct SettingsView: View {
     private var spotifySection: some View {
         Section {
             if auth.isSignedIn {
-                LabeledContent("Spotify", value: "Connected")
+                LabeledContent("Spotify", value: profile.map { "Signed in as \($0.label)" } ?? "Connected")
+                    .accessibilityIdentifier("spotifyAccount")
                 Toggle("Tap a line to jump there", isOn: Binding(
                     get: { settings.allowSeeking && auth.canSeek },
                     set: { setSeeking($0) }
@@ -145,6 +147,13 @@ struct SettingsView: View {
             Text("Spotify")
         } footer: {
             Text("Jumping to a line needs Spotify Premium and an extra permission to control playback. You'll be asked to approve it when you turn this on.")
+        }
+        .task(id: auth.isSignedIn) {
+            // Shows which account is connected (EC6). Quietly stays "Connected" if Spotify says no.
+            guard auth.isSignedIn, !LaunchOptions.isUITesting else { profile = nil; return }
+            let auth = self.auth
+            let api = SpotifyWebAPI(http: URLSession.shared) { force in try await auth.accessToken(forceRefresh: force) }
+            profile = try? await api.me()
         }
     }
 

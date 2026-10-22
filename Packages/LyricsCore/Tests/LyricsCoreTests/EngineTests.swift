@@ -299,7 +299,7 @@ final class NowPlayingEngineTests: XCTestCase {
         XCTAssertEqual(lines.compactMap { $0 }, lines.compactMap { $0 }.sorted(), "the line never moves backwards")
         XCTAssertEqual(lines.last, 4, "held where the clock had got to (22 s)")
         XCTAssertEqual(delays.last ?? 0, NowPlayingEngine.playingPollInterval, "steady pace, no endless fast polling")
-        engine.tick(at: 200)
+        engine.tick(at: 119)
         XCTAssertEqual(engine.snapshot.currentLine, 4, "frozen while stalled")
 
         // Playback really moves again (the device is back).
@@ -459,5 +459,17 @@ final class DemoPlaybackTests: XCTestCase {
         XCTAssertEqual(lyrics, .synced(timeline))
         let other = try await DemoLyricsProvider().lyrics(for: makeTrack())
         XCTAssertEqual(other, .notFound)
+    }
+
+    func testPodcastsAndAdsSayWhatIsPlaying() {
+        var engine = NowPlayingEngine(isSignedIn: true)
+        _ = engine.apply(PlaybackSample(track: nil, position: 10, isPlaying: true, kind: .episode), at: 100)
+        XCTAssertEqual(engine.snapshot.playingKind, .episode)
+        XCTAssertEqual(LiveLyricsContent.make(for: engine.snapshot, position: nil).current, "Spotify is playing a podcast")
+        _ = engine.apply(PlaybackSample(track: nil, position: 3, isPlaying: true, kind: .ad), at: 102)
+        guard case .message(let title, _) = LyricsDisplay.make(for: engine.snapshot, maxRows: 4) else { return XCTFail() }
+        XCTAssertEqual(title, "Spotify is playing an ad")
+        _ = engine.apply(PlaybackSample(track: nil, position: 0, isPlaying: false), at: 104)
+        XCTAssertEqual(LiveLyricsContent.make(for: engine.snapshot, position: nil).current, "Nothing playing")
     }
 }

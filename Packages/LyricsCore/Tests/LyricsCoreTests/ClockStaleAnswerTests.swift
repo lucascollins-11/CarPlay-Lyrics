@@ -39,4 +39,25 @@ final class ClockStaleAnswerTests: XCTestCase {
         }
         XCTAssertTrue(seen, "a real backward seek must be followed within two polls")
     }
+
+    /// "Previous" mid-song restarts it: shown at once, not a poll later (EC37).
+    func testRestartFromMidSongIsImmediate() {
+        var (clock, t) = steadyClock()
+        t += 1.5
+        XCTAssertTrue(clock.update(position: 0.4, at: t, isPlaying: true, duration: 300, uncertainty: 0.15))
+        XCTAssertEqual(clock.position(at: t), 0.4, accuracy: 0.01)
+    }
+
+    func testAJumpBackAsksAgainSoon() {
+        var engine = NowPlayingEngine(isSignedIn: true)
+        let track = NowPlayingTrack(id: "a", title: "A", artists: ["X"], album: "", duration: 300)
+        var t = 1000.0
+        for i in 0..<5 {
+            _ = engine.apply(PlaybackSample(track: track, position: 100 + Double(i) * 1.5, isPlaying: true), at: t, uncertainty: 0.1)
+            t += 1.5
+        }
+        _ = engine.apply(PlaybackSample(track: track, position: 60, isPlaying: true), at: t, uncertainty: 0.1)
+        XCTAssertNotNil(engine.clock?.pendingRewind)
+        XCTAssertEqual(engine.nextPollDelay(at: t), NowPlayingEngine.rewindConfirmDelay, accuracy: 0.001)
+    }
 }

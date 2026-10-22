@@ -29,12 +29,14 @@ public struct PlaybackClock: Equatable, Sendable {
     /// answers with a position a second or two old; taking that as a seek would make the lyrics
     /// jump back and forward again. A real backward seek shows one answer later.
     public private(set) var pendingRewind: (position: TimeInterval, time: TimeInterval)?
+    /// How far the last blended answer moved the estimate (negative: pulled back). Zero after a jump.
+    public private(set) var lastCorrection: TimeInterval = 0
 
     public static func == (a: PlaybackClock, b: PlaybackClock) -> Bool {
         a.anchorPosition == b.anchorPosition && a.anchorTime == b.anchorTime && a.isPlaying == b.isPlaying
             && a.duration == b.duration && a.anchorVariance == b.anchorVariance && a.offsetBounds == b.offsetBounds
             && a.pendingRewind?.position == b.pendingRewind?.position && a.pendingRewind?.time == b.pendingRewind?.time
-            && a.jitterTolerance == b.jitterTolerance
+            && a.jitterTolerance == b.jitterTolerance && a.lastCorrection == b.lastCorrection
     }
 
     /// A sample further than this from the prediction (or than its own
@@ -49,7 +51,7 @@ public struct PlaybackClock: Equatable, Sendable {
     /// How fast the bounds widen (seconds per second): the phone's clock and the device's can drift
     /// apart slightly, so old samples bound the music less tightly.
     public static let boundsDrift: Double = 0.002
-    /// A jump back to within this many seconds of the start, from this close to the end, is taken at once.
+    /// A jump back to within this many seconds of the start is taken at once.
     public static let restartWindow: TimeInterval = 5
 
     /// - Parameter uncertainty: half the round trip of the request the position came from.
@@ -110,10 +112,10 @@ public struct PlaybackClock: Equatable, Sendable {
             let agrees = rewind.map {
                 abs($0.position + (time - $0.time) - position) <= threshold || abs($0.position - position) <= threshold
             } ?? false
-            // Back to the start right at the end is repeat-one (or a restart), not a stale answer.
-            let restartAtEnd = position < Self.restartWindow
-                && duration.map { predicted >= $0 - Self.restartWindow } ?? false
-            if !agrees, !restartAtEnd {
+            // Back to the start is a restart ("Previous" on the steering wheel, repeat-one), not a
+            // stale answer: those are a second or two old, never minutes.
+            let restart = position < Self.restartWindow
+            if !agrees, !restart {
                 pendingRewind = (position, time)
                 return false
             }
@@ -146,12 +148,14 @@ public struct PlaybackClock: Equatable, Sendable {
                 anchorPosition = min(max(offset, offsetBounds.lowerBound), offsetBounds.upperBound) + time
                 anchorTime = time
                 anchorVariance = variance * measurementVariance / (variance + measurementVariance)
+                lastCorrection = anchorPosition - predicted
                 // When the samples together pin the music down more tightly than the blend does (several
                 // vague samples from both sides), the middle of the range they allow is the better estimate.
                 let halfWidth = (offsetBounds.upperBound - offsetBounds.lowerBound) / 2
                 if halfWidth * halfWidth / 3 < anchorVariance {
                     anchorPosition = (offsetBounds.lowerBound + offsetBounds.upperBound) / 2 + time
                     anchorVariance = halfWidth * halfWidth / 3
+                    lastCorrection = anchorPosition - predicted
                 }
                 // Never fully certain: leaves room for Spotify's own small drifts.
                 anchorVariance += Self.measurementFloor * Self.measurementFloor / 4
@@ -162,6 +166,7 @@ public struct PlaybackClock: Equatable, Sendable {
         anchorTime = time
         anchorVariance = measurementVariance
         offsetBounds = Self.bounds(position: position, at: time, uncertainty: uncertainty)
+        lastCorrection = 0
         self.isPlaying = isPlaying
         return true
     }

@@ -25,6 +25,8 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
     public var problem: String?
     /// Timing adjustment for this song only, in seconds (positive shows lyrics earlier).
     public var trackOffset: TimeInterval
+    /// What Spotify is playing when there is no song to show (a podcast, an ad).
+    public var playingKind: PlayingKind = .nothing
 
     public init(isSignedIn: Bool = false, isDemo: Bool = false, track: NowPlayingTrack? = nil, isPlaying: Bool = false,
                 lyrics: LyricsState = .none, currentLine: Int? = nil, lyricsChosenByUser: Bool = false,
@@ -64,6 +66,7 @@ public struct NowPlayingEngine: Sendable {
 
     public private(set) var snapshot: NowPlayingSnapshot
     public private(set) var clock: PlaybackClock?
+    private var lastTickAt: TimeInterval?
     /// Seconds added to every song's position before picking a line (for
     /// example to make up for Bluetooth delay). Positive shows lyrics earlier.
     public var globalOffset: TimeInterval
@@ -89,6 +92,10 @@ public struct NowPlayingEngine: Sendable {
     public static let longRateLimit: TimeInterval = 30
     /// Longest wait after a request that didn't get through (no signal, timeout).
     public static let maxTransportBackoff: TimeInterval = 8
+    /// How soon to ask again after an answer that jumped back (see `PlaybackClock.pendingRewind`).
+    public static let rewindConfirmDelay: TimeInterval = 0.4
+    /// The answers so far allow more than this (seconds) of uncertainty: the position isn't pinned down yet.
+    public static let vagueBoundsWidth: TimeInterval = 0.4
     /// The last position Spotify reported while saying it was playing, to notice a frozen position.
     private var lastPlayingPosition: TimeInterval?
     private var lastPlayingAt: TimeInterval?
@@ -112,6 +119,7 @@ public struct NowPlayingEngine: Sendable {
     public static let maxEarlyPolls = 4
     /// The line only moves back if the position is this far before the current line's start.
     public static let backwardHysteresis: TimeInterval = 0.3
+    public static let maxBackwardHysteresis: TimeInterval = 0.6
     /// Consecutive 401s, after a forced token refresh each, before asking the user to sign in again.
     public static let maxUnauthorized = 3
     /// Spotify can answer back-to-back requests with the same cached position, so a stall
@@ -181,6 +189,7 @@ public struct NowPlayingEngine: Sendable {
         snapshot.problem = nil
 
         guard let track = sample.track else {
+            if snapshot.track == nil { snapshot.playingKind = sample.kind }
             let hadTrack = snapshot.track != nil
             emptySamplesInARow += 1
             if hadTrack, emptySamplesInARow < Self.emptySamplesToClear,
@@ -191,6 +200,7 @@ public struct NowPlayingEngine: Sendable {
             }
             clock = nil
             snapshot.track = nil
+            snapshot.playingKind = sample.kind
             snapshot.isPlaying = false
             snapshot.lyrics = .none
             snapshot.currentLine = nil
@@ -245,7 +255,8 @@ public struct NowPlayingEngine: Sendable {
                                   uncertainty: uncertainty)
                 }
                 if !isStalled, repeatCount >= Self.stallMinimumRepeats, let since = repeatSince,
-                   time - since >= Self.stallMinimumSpan, let current = clock?.position(at: time) {
+                   time - since >= Self.stallMinimumSpan, let current = clock?.position(at: max(time, lastTickAt ?? time)) {
+                    // Held where the line already is (the last tick can be later than this request's midpoint).
                     clock = PlaybackClock(position: current, at: time, isPlaying: false, duration: track.duration)
                     isStalled = true
                 }
@@ -391,13 +402,20 @@ public struct NowPlayingEngine: Sendable {
     /// Recomputes the current line. Returns true if it changed.
     @discardableResult
     public mutating func tick(at time: TimeInterval) -> Bool {
+        // A sample is applied at its request's midpoint, which can be before the last tick: the
+        // shown line must not step back for that.
+        let time = max(time, lastTickAt ?? time)
+        lastTickAt = time
         guard let timeline = snapshot.timeline, let position = position(at: time) else { return false }
         let line = timeline.index(at: position)
         guard line != snapshot.currentLine else { return false }
         // A small correction of the clock must not flash the previous line back for a moment.
         // Real jumps back (seeks, repeats, offset changes) move further than this and still apply.
+        // After a vague anchor (a slow request) a correction can be bigger than that: hold the line
+        // for as far as the clock was just pulled back, so it is reached again instead of flashing back.
+        let margin = max(Self.backwardHysteresis, -(clock?.lastCorrection ?? 0) + 0.05)
         if let current = snapshot.currentLine, (line ?? -1) < current, clock?.isPlaying == true,
-           position > timeline.lines[current].time - Self.backwardHysteresis {
+           position > timeline.lines[current].time - min(margin, Self.maxBackwardHysteresis) {
             return false
         }
         snapshot.currentLine = line
@@ -455,6 +473,14 @@ public struct NowPlayingEngine: Sendable {
         var delay: TimeInterval = clock.isPlaying || isStalled ? playingInterval : Self.pausedPollInterval
         if time < fastPollUntil {
             delay = min(delay, Self.fastPollInterval)
+            // Just after a change, until an answer has pinned the new position down, ask sooner still.
+            if clock.isPlaying, clock.offsetBounds.upperBound - clock.offsetBounds.lowerBound > Self.vagueBoundsWidth {
+                delay = min(delay, Self.rewindConfirmDelay)
+            }
+        }
+        // One answer said "back": confirm it (or not) quickly, so a real seek back isn't a poll late.
+        if clock.pendingRewind != nil, time >= slowPollingUntil {
+            delay = min(delay, Self.rewindConfirmDelay)
         }
         // Ask again just after the song should end, to catch the next one quickly. Once the clock
         // sits at the end, only the capped early polls (takeEarlyPoll) hurry things along.
