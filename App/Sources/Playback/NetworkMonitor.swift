@@ -7,13 +7,15 @@ import Network
 final class NetworkMonitor {
     private let monitor = NWPathMonitor()
     private var wasSatisfied = true
+    private let onRestored: @MainActor () -> Void
 
     init(onRestored: @escaping @MainActor () -> Void) {
+        self.onRestored = onRestored
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
             Task { @MainActor in
                 guard let self else { return }
-                if satisfied && !self.wasSatisfied { onRestored() }
+                if satisfied && !self.wasSatisfied { self.onRestored() }
                 self.wasSatisfied = satisfied
             }
         }
