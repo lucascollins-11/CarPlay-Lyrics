@@ -69,13 +69,18 @@ final class CarPlayLyricsUITests: XCTestCase {
 
         app.swipeUp()
         app.buttons["Privacy Policy"].tap()
-        XCTAssertTrue(app.staticTexts["Privacy Policy"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Privacy Policy"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "lrclib.net")).firstMatch.exists)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        // The lyrics screen's bar is still there behind the sheet, so go back through this screen's own bar.
+        app.navigationBars["Privacy Policy"].buttons.element(boundBy: 0).tap()
 
+        XCTAssertTrue(app.buttons["Terms of Use"].waitForExistence(timeout: 5))
         app.buttons["Terms of Use"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Don't read lyrics while driving")).firstMatch.waitForExistence(timeout: 5))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["Terms of Use"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Don't read lyrics while driving")).firstMatch.exists)
+        app.navigationBars["Terms of Use"].buttons.element(boundBy: 0).tap()
+
+        XCTAssertTrue(app.buttons["aboutLink"].waitForExistence(timeout: 5))
 
         app.buttons["aboutLink"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "LRCLIB")).firstMatch.waitForExistence(timeout: 5))
@@ -89,11 +94,9 @@ final class CarPlayLyricsUITests: XCTestCase {
         app.swipeUp()
         app.swipeUp()
         app.buttons["deleteDataButton"].tap()
-        let dialog = app.sheets.firstMatch
-        XCTAssertTrue(dialog.waitForExistence(timeout: 5))
-        let confirm = dialog.buttons["Delete my data"]
-        XCTAssertTrue(confirm.exists)
-        XCTAssertTrue(dialog.buttons["Cancel"].exists, "a plain way out")
+        let confirm = app.buttons["Delete all data"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Cancel"].exists, "a plain way out")
         confirm.tap()
         XCTAssertTrue(app.alerts["Your data was deleted"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.alerts.buttons["Open Spotify account settings"].exists)

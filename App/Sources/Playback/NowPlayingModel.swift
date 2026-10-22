@@ -78,7 +78,8 @@ final class NowPlayingModel: ObservableObject {
     var isDemo: Bool { engine.snapshot.isDemo }
     private var source: PlaybackSource { isDemo ? deps.demo : deps.spotify }
     private var lyricsProvider: LyricsProvider { isDemo ? deps.demoLyrics : deps.lyrics }
-    private var canRun: Bool { isDemo || auth.isSignedIn }
+    // The engine's flag, not auth.isSignedIn: @Published sinks run before the new value is stored.
+    private var canRun: Bool { isDemo || engine.snapshot.isSignedIn }
     var isRunning: Bool { pollTask != nil }
 
     /// Seeking is possible in demo mode, or with the extra Spotify permission turned on.

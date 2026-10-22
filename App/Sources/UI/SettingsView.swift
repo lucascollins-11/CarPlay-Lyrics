@@ -156,7 +156,7 @@ struct SettingsView: View {
             Button("Delete my data", role: .destructive) { confirmDelete = true }
                 .accessibilityIdentifier("deleteDataButton")
                 .confirmationDialog("Delete all data?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                    Button("Delete my data", role: .destructive) {
+                    Button("Delete all data", role: .destructive) {
                         Task {
                             driveMode.stop()
                             await model.deleteAllData()
