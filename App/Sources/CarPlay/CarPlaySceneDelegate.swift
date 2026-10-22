@@ -18,11 +18,13 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     // CarPlay calls these on the main thread; the protocol just doesn't say so.
     nonisolated func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                               didConnect interfaceController: CPInterfaceController) {
+        // CarPlay hands this over on the main thread and nothing else keeps a reference.
+        nonisolated(unsafe) let controller = interfaceController
         MainActor.assumeIsolated {
-            self.interfaceController = interfaceController
+            self.interfaceController = controller
             let template = CarPlayLyricsTemplate(model: AppServices.shared.model)
             lyricsTemplate = template
-            interfaceController.setRootTemplate(template.template, animated: false, completion: nil)
+            controller.setRootTemplate(template.template, animated: false, completion: nil)
         }
     }
 
