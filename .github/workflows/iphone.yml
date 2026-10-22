@@ -25,6 +25,9 @@ on:
   pull_request:
     paths: [.github/workflows/iphone.yml]
 
+permissions:
+  contents: read
+
 env:
   SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID || 'YOUR_SPOTIFY_CLIENT_ID' }}
   BUNDLE_ID_PREFIX: ${{ vars.BUNDLE_ID_PREFIX || 'com.example' }}
