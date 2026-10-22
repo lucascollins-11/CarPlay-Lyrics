@@ -31,13 +31,10 @@ final class BackgroundKeepAlive {
         let center = NotificationCenter.default
         observers = [
             // A call, Siri or a navigation prompt interrupts every session; pick up again afterwards.
-            // An interruption that "began" only because iOS had suspended the app is already over: resume now.
             center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
                 let rawType = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-                let rawReason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
-                let ended = rawType == AVAudioSession.InterruptionType.ended.rawValue
-                let wasSuspended = rawReason == AVAudioSession.InterruptionReason.appWasSuspended.rawValue
-                guard ended || wasSuspended else { return }
+                // (The "app was suspended" interruption reason no longer exists since iOS 16; we need iOS 18.)
+                guard rawType == AVAudioSession.InterruptionType.ended.rawValue else { return }
                 MainActor.assumeIsolated { self?.resume() }
             },
             // Plugging in or unplugging CarPlay, Bluetooth or headphones can stop the player.
