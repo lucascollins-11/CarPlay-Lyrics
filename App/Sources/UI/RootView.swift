@@ -8,6 +8,7 @@ struct RootView: View {
     @EnvironmentObject private var model: NowPlayingModel
     @EnvironmentObject private var driveMode: DriveModeController
     @Environment(\.scenePhase) private var scenePhase
+    @State private var expiry = BuildExpiry.current()
 
     var body: some View {
         Group {
@@ -19,10 +20,23 @@ struct RootView: View {
                 SignInView()
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let warning = expiry.warning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.yellow)
+                    .accessibilityIdentifier("buildExpiryBanner")
+            }
+        }
         .preferredColorScheme(.dark)
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.setActive(phase == .active, client: "phone")
             if phase == .active {
+                expiry = BuildExpiry.current()
                 model.refreshNow()
                 driveMode.appBecameActive()
             }

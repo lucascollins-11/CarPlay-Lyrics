@@ -83,6 +83,8 @@ final class DriveModeController: ObservableObject {
             )
             attach(to: activity)
             model.settings.driveModeEnabled = true
+            // The first Drive mode is when an expiry warning starts to matter: ask for notifications now.
+            BuildExpiryReminder.reschedule(askIfNeeded: true)
             return isRunning
         } catch {
             message = "Couldn't start Drive mode: \(error.localizedDescription)"

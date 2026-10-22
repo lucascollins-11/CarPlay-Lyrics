@@ -34,6 +34,8 @@ the CarPlay screen without Spotify.
 6. In Development mode Spotify only lets accounts listed under **User Management** use
    the app. Add your own Spotify email there. (If you skip this, the app shows
    "Spotify won't share playback with this app for your account".)
+   Since Spotify's February 2026 rules, the account that **owns** the developer app needs
+   **Premium**, and a development-mode app allows at most **5 users**. Listeners can be Free.
 
 No client secret is needed: the app uses PKCE.
 
@@ -79,6 +81,28 @@ nothing playing, or when you sign out. iOS ends any Live Activity after 8 hours;
 again the next day. If Live Activities are off for the app, turn them
 on in Settings > Lyrics.
 
+Where it shows in the car (Apple's rules, not this app's):
+- Only on the **CarPlay Dashboard**, in the small bottom-right tile it shares with the
+  calendar. It doesn't show over full-screen Spotify or Maps.
+- Turn on **Live Activities** in the car's CarPlay settings (on the iPhone: Settings >
+  General > CarPlay > your car).
+- Pressing and holding the tile hides it for that drive.
+- Some cars need a firmware update before Live Activities show at all.
+- Live Activities can't be tapped in CarPlay; control music from Spotify as usual.
+
+**Start it automatically:** in the Shortcuts app, Automation > New > CarPlay > Connects >
+Run Immediately, action **Start Drive mode** (from Lyrics). Add a second one for
+Disconnects with **Stop Drive mode**. If iOS won't let Lyrics start its background audio
+from the automation, Drive mode still shows the tile and asks you to open Lyrics once.
+
+**Timing in the car:** Settings > Timing adjusts the route that's playing now (the car is
+remembered separately from Bluetooth headphones). Settings > Drive mode > **Send lines
+early** sets how far ahead the Dashboard gets each line (default 0.3 s); raise it if the
+tile trails the music.
+
+A sideloaded build expires (7 days with a free Apple ID, 1 year with a paid account).
+Lyrics warns two days ahead in the app and with a notification the day before.
+
 Glance at the dashboard only when it's safe. Don't read lyrics while driving.
 
 ### First drive: test checklist (please report results)
@@ -98,6 +122,10 @@ These can only be measured on a real iPhone in a real car. Pass/fail thresholds:
 | 9 | Battery over a 1-hour drive | Under ~5% extra drain compared with Spotify alone |
 | 10 | Stop for 10 minutes with the car off (fuel, coffee), then drive on | Lyrics come back on the Dashboard without touching the phone |
 | 11 | Park, get out, leave the phone alone | Drive mode ends by itself within ~20 minutes |
+| 12 | With the automation set up, get in and connect CarPlay without unlocking the phone | Drive mode starts and the tile appears within 15 s |
+| 13 | Ask Siri to play something in another app, then go back to Spotify | The Dashboard line recovers without touching the phone |
+| 14 | Unplug and replug CarPlay (or turn the car off and on) mid-song | The Dashboard line recovers without touching the phone |
+| 15 | A long drive on a hot day, phone in a mount in the sun | Lyrics keep updating; note if iOS shows a temperature warning |
 
 If #2 fails (updates throttled), the fallback is to show the next line in advance; tell
 Claude the measured delay.
@@ -138,5 +166,6 @@ UI-test screenshots in the run's `TestResults` artifact.
 | "Spotify won't share playback with this app for your account" | Add your Spotify email under **User Management** in the dashboard. |
 | "Nothing playing" while music plays | Podcasts, Private Sessions and some local files don't report a song. |
 | "No lyrics for this song" | LRCLIB has none. Try **Wrong lyrics?** to search, or add them at lrclib.net. |
-| Lyrics consistently early or late | Use − / + under the lyrics (this song) or Settings > Timing (all songs). |
+| Lyrics consistently early or late | Use − / + under the lyrics (this song) or Settings > Timing (all songs on the current route: car, Bluetooth, speaker…). |
+| Nothing shows on the CarPlay screen | Look at the **Dashboard**, not the Spotify screen; check Live Activities is on in CarPlay settings; check the tile wasn't hidden with a long press. |
 | Drive mode stops by itself | 20 minutes after CarPlay disconnected, nothing played for 15 minutes away from the car, you signed out, or the 8-hour Live Activity limit. Start it again. |

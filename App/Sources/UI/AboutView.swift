@@ -6,6 +6,9 @@ struct AboutView: View {
             Section {
                 LabeledContent("App", value: "Lyrics (CarPlay Lyrics)")
                 LabeledContent("Version", value: AppConfig.version)
+                if let expires = BuildExpiry.current().expiryDate {
+                    LabeledContent("Build expires", value: expires.formatted(date: .abbreviated, time: .shortened))
+                }
                 LabeledContent("Made by", value: AppConfig.publisherName)
                 if let email = AppConfig.supportEmail, let url = URL(string: "mailto:\(email)") {
                     Link(destination: url) { LabeledContent("Support", value: email) }

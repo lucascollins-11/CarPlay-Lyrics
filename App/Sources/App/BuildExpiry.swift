@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 /// When this sideloaded build stops launching. A build signed with a free Apple ID
 /// expires after 7 days (a paid developer account: 1 year), and in the car an
@@ -50,5 +51,58 @@ enum BuildExpiry {
             return .expiringSoon(expires: expiration, daysLeft: Int((remaining / (24 * 3600)).rounded(.up)))
         }
         return .valid(expires: expiration)
+    }
+}
+
+extension BuildExpiry.Status {
+    /// What to tell the user, or nil while there is nothing to warn about.
+    var warning: String? {
+        switch self {
+        case .unknown, .valid: return nil
+        case .expiringSoon(_, let daysLeft):
+            return daysLeft <= 1
+                ? "This build of Lyrics stops opening within a day. Reinstall it from Xcode before your next drive."
+                : "This build of Lyrics stops opening in \(daysLeft) days. Reinstall it from Xcode before then."
+        case .expired:
+            return "This build of Lyrics has expired. Reinstall it from Xcode."
+        }
+    }
+
+    var expiryDate: Date? {
+        switch self {
+        case .unknown: return nil
+        case .valid(let date), .expiringSoon(let date, _), .expired(let date): return date
+        }
+    }
+}
+
+
+/// A local notification about a day before the build expires, so it isn't found out in the car.
+/// Re-scheduled on every launch (a reinstall moves the date); permission is asked when Drive mode
+/// first starts, not at launch.
+enum BuildExpiryReminder {
+    static let identifier = "buildExpiry"
+    static let lead: TimeInterval = 24 * 3600
+
+    static func reschedule(status: BuildExpiry.Status = BuildExpiry.current(), askIfNeeded: Bool = false) {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        guard let expires = status.expiryDate else { return }
+        let fireAt = expires.addingTimeInterval(-lead)
+        guard fireAt > Date() else { return }
+        Task {
+            var settings = await center.notificationSettings()
+            if settings.authorizationStatus == .notDetermined, askIfNeeded {
+                _ = try? await center.requestAuthorization(options: [.alert, .sound])
+                settings = await center.notificationSettings()
+            }
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Lyrics expires tomorrow"
+            content.body = "Reinstall it from Xcode so it still opens in the car."
+            let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fireAt)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+            try? await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
+        }
     }
 }

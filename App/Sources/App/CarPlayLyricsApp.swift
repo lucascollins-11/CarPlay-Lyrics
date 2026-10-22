@@ -26,6 +26,7 @@ final class AppServices {
         routeMonitor = AudioRouteMonitor { route in model.setAudioRoute(route) }
         // Also on a background-only launch (CarPlay, a Shortcut), not just when the iPhone UI appears.
         driveMode.restoreIfNeeded()
+        BuildExpiryReminder.reschedule()
     }
 
     /// UI tests start from a clean install.

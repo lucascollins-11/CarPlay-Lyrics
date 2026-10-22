@@ -4,12 +4,17 @@ An iPhone app that shows time-synced lyrics for the song playing on your Spotify
 account, when [LRCLIB](https://lrclib.net) has them, and puts the current line on the
 **CarPlay Dashboard** with iOS 26.
 
-- Sign in once with Spotify (Free or Premium). Read-only by default.
+- Sign in once with Spotify (Free or Premium listeners). Read-only by default. Since
+  February 2026 the owner of the Spotify developer app must have **Premium**, and a
+  development-mode app allows up to 5 users.
 - Follows the song and highlights the line being sung. Works with Spotify playing on
   any device: the phone, the car, a speaker.
 - **Drive mode** shows the current and next line as a Live Activity on the Lock Screen,
   in the Dynamic Island and on the CarPlay Dashboard (iOS 26+).
-- Per-song timing nudges, plus a global offset for Bluetooth/car-stereo delay.
+- Per-song timing nudges, plus a timing offset per audio route (car, Bluetooth, AirPlay,
+  wired, speaker), and a Dashboard lead so lines land on time in the car.
+- Shortcuts: Start/Stop Drive mode, Lyrics earlier/later. Can start automatically when
+  CarPlay connects.
 - "Wrong lyrics?" lets you pick another version from LRCLIB; the choice is remembered.
 - Lyrics for the next songs in your queue are prefetched, so they appear instantly even
   with patchy signal. Everything you've seen is cached for offline use.
