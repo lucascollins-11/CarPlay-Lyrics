@@ -1,57 +1,92 @@
 # CarPlay Lyrics
 
-An iPhone app with a CarPlay screen that shows time-synced lyrics for whatever you
-are playing on Spotify.
+An iPhone app that shows time-synced lyrics for the song playing on your Spotify
+account, when [LRCLIB](https://lrclib.net) has them, and puts the current line on the
+**CarPlay Dashboard** with iOS 26.
 
-- Sign in once with your Spotify account (works with any device you play on: the phone,
-  the car, a speaker).
-- The app follows the song and highlights the line being sung, on the phone and in CarPlay.
-- Lyrics come from [LRCLIB](https://lrclib.net), a free, open database of synced lyrics,
-  and are cached on the phone.
-- Timing can be nudged ±0.25 s from the phone or the CarPlay top bar.
+- Sign in once with Spotify (Free or Premium listeners). Read-only by default. Since
+  February 2026 the owner of the Spotify developer app must have **Premium**, and a
+  development-mode app allows up to 5 users.
+- Follows the song and highlights the line being sung. Works with Spotify playing on
+  any device: the phone, the car, a speaker.
+- **Drive mode** shows the current and next line as a Live Activity on the Lock Screen,
+  in the Dynamic Island and on the CarPlay Dashboard (iOS 26+).
+- Per-song timing nudges, plus a timing offset per audio route (car, Bluetooth, AirPlay,
+  wired, speaker), and a Dashboard lead so lines land on time in the car.
+- Shortcuts: Start/Stop Drive mode, Lyrics earlier/later. Can start automatically when
+  CarPlay connects.
+- "Wrong lyrics?" lets you pick another version from LRCLIB; the choice is remembered.
+- Lyrics for the next songs in your queue are prefetched, so they appear instantly even
+  with patchy signal. Everything you've seen is cached for offline use.
+- Optional: tap a line to jump there (needs Spotify Premium and an extra permission).
+- A built-in demo song lets you try everything without a Spotify account.
 
-Setup steps are in **[SETUP.md](SETUP.md)**.
+Setup steps are in **[SETUP.md](SETUP.md)**. Privacy: [PRIVACY.md](PRIVACY.md).
+Terms: [TERMS.md](TERMS.md).
+
+## Where lyrics show up in a car, honestly
+
+Apple's CarPlay Developer Guide says audio apps must **"Never show song lyrics on the
+CarPlay screen"**, and no other CarPlay category fits a lyrics app. So Apple won't grant
+this app a CarPlay entitlement, and the full-screen CarPlay app (a list of lyric lines)
+only runs in the Xcode Simulator.
+
+What does work in a real car is a **Live Activity**: since iOS 26, Live Activities appear
+on the CarPlay Dashboard without any CarPlay entitlement. Drive mode keeps the app
+running in the background (with a silent audio session that mixes with Spotify) so it
+can keep the Live Activity's line current. That background trick is fine for a copy you
+install yourself from Xcode, but would not pass App Store review. This project is for
+personal use, not for distribution.
 
 ## How it works
 
 ```
-Spotify Web API ──(poll every 3 s)──▶ NowPlayingModel ◀── LRCLIB (/api/get, /api/search)
-  /me/player/currently-playing         │  PlaybackClock interpolates the position
-                                       │  between polls (10 ticks/s)
-                                       ▼
-                         Snapshot (track, lyrics, current line)
-                           │                           │
-                    SwiftUI iPhone screen      CarPlay CPListTemplate
+Spotify Web API ──(poll 1.25–5 s)──▶ NowPlayingEngine ◀── LRCLIB (/api/get, /api/search)
+  /me/player/currently-playing        │ PlaybackClock interpolates between polls
+  /me/player/queue (prefetch)         │ (10 ticks/s), per-song + global offsets
+                                      ▼
+                       NowPlayingSnapshot (track, lyrics, current line)
+                 │                     │                         │
+          iPhone (SwiftUI)    Live Activity (Drive mode)   CarPlay list (Simulator)
 ```
 
 | Part | Where |
 | --- | --- |
-| LRC parsing, line lookup, playback clock, LRCLIB matching, Spotify JSON | `Packages/LyricsCore` (pure Swift, unit tested) |
-| Spotify sign-in (PKCE, tokens in Keychain) | `App/Sources/Spotify/SpotifyAuth.swift` |
-| Polling Spotify, loading lyrics, current line | `App/Sources/Playback/NowPlayingModel.swift` |
-| Lyrics cache | `App/Sources/Playback/LyricsRepository.swift` |
+| LRC parsing, timeline, playback clock, sync engine, LRCLIB matching, Spotify clients, PKCE, cache, display rows, demo song | `Packages/LyricsCore` (pure Swift, 116 tests, runs on macOS and Linux) |
+| Spotify sign-in and token refresh | `App/Sources/Spotify` |
+| Timers and network calls around the engine | `App/Sources/Playback/NowPlayingModel.swift` |
+| Drive mode (Live Activity + background keep-alive) | `App/Sources/DriveMode`, `Widget/`, `Shared/` |
 | iPhone UI | `App/Sources/UI` |
-| CarPlay UI | `App/Sources/CarPlay/CarPlaySceneDelegate.swift` |
+| CarPlay app screen (Simulator only) | `App/Sources/CarPlay` |
+| App unit tests and UI tests (demo mode) | `Tests/` |
 
 ### Design notes
 
-- **Why the Web API and not the Spotify iOS SDK?** The Web API sees playback on every
-  device (including Spotify running natively in some cars), needs no binary SDK, and
-  needs no Spotify app on the phone. The cost is polling: the position is fetched every
-  3 s and interpolated locally, with small disagreements (< 0.35 s) ignored so the
-  highlight doesn't flicker. When a song should have ended, the app polls right away
-  to catch the next track.
-- **CarPlay screen.** CarPlay apps can't draw custom views, only Apple's templates. The
-  app uses a list template: the previous line, the current line (marked with CarPlay's
-  playing indicator), and the next lines. Long lines wrap onto the row's second line.
-- **Lyric matching.** Exact match by title, artist, album and duration first; then the
-  title without suffixes like "- Remastered 2011" or "(feat. …)"; then a search ranked by
-  title, artist, duration (within 5 s) and synced over plain lyrics.
+- **Spotify Web API, not the iOS SDK.** It sees playback on every device, needs no binary
+  SDK and no Spotify app on the phone. The position is polled and interpolated locally;
+  disagreements under 0.35 s are ignored so the highlight doesn't flicker. After a
+  change (new song, pause, seek) it polls every 1.25 s for a few seconds, and it polls
+  right when a song should end to catch the next one quickly.
+- **Errors.** A dead zone keeps the lyrics running on the local clock with exponential
+  backoff (2 → 30 s). A 403 (account not on the Spotify app's allowlist) says so. 429s
+  honour `Retry-After`. A revoked token signs you out cleanly.
+- **Lyric matching.** Exact signature match (title, artist, album, duration) first, then
+  the title without "- Remastered 2011"/"(feat. …)", then a ranked search. Matches more
+  than 3 s off the Spotify duration are rejected as another cut of the song.
+- **CarPlay list screen.** Rows are updated in place (no list flicker), aren't tappable,
+  and messages never ask the driver to pick up their phone.
 
-## Limits worth knowing
+## Accessibility
 
-- A real car needs Apple's CarPlay entitlement, which Apple may not grant for a lyrics
-  app (see SETUP.md, step 5). The Simulator works without it.
-- Spotify apps in Development mode only work for accounts you add in the Spotify dashboard.
-  Publishing to the App Store would also need Spotify's extended quota approval and a
-  look at lyric licensing, since LRCLIB lyrics are community submitted.
+VoiceOver labels throughout (the current line is announced as selected, instrumental
+breaks as "Instrumental break"), all lyric colours above 4.5:1 contrast with brighter
+values under Increase Contrast, Reduce Motion respected, controls that re-flow at the
+largest Dynamic Type sizes, and every gesture also available as a button or
+accessibility action.
+
+## Credits
+
+- Lyrics: [LRCLIB](https://lrclib.net), a community database. Lyrics belong to their
+  copyright owners.
+- Song data and artwork: Spotify. Not affiliated with or endorsed by Spotify or Apple.
+- The app icon was drawn for this project (generated in code); symbols are Apple's SF Symbols.

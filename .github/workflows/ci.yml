@@ -5,25 +5,79 @@ on:
   pull_request:
 
 jobs:
-  build:
+  core:
+    name: LyricsCore tests (swift test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        working-directory: Packages/LyricsCore
+        run: swift test -Xswiftc -warnings-as-errors
+
+  app:
+    name: App build, unit and UI tests (Simulator)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unit tests (LyricsCore)
-        working-directory: Packages/LyricsCore
-        run: swift test
+      - name: Tools
+        run: brew install xcodegen xcbeautify
 
       - name: Generate Xcode project
-        run: |
-          brew install xcodegen
-          xcodegen generate
+        run: xcodegen generate
 
-      - name: Build app for the Simulator
+      - name: Pick a Simulator
+        id: sim
         run: |
-          xcodebuild build \
-            -project CarPlayLyrics.xcodeproj \
-            -scheme CarPlayLyrics \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            -quiet
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          runtimes = sorted((r for r in data if "iOS" in r), key=lambda r: [int(x) for x in r.rsplit("iOS-", 1)[1].split("-")])
+          for runtime in reversed(runtimes):
+              phones = [d for d in data[runtime] if d["name"].startswith("iPhone") and d["isAvailable"]]
+              if phones:
+                  print(phones[0]["udid"]); break
+          ')
+          echo "Using simulator $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: Check entitlements per SDK (no CarPlay entitlement on device builds)
+        run: |
+          set -euo pipefail
+          ent() {
+            xcodebuild -showBuildSettings -project CarPlayLyrics.xcodeproj -target CarPlayLyrics -sdk "$1" 2>/dev/null \
+              | awk -F' = ' '/ CODE_SIGN_ENTITLEMENTS /{print $2; exit}'
+          }
+          DEVICE=$(ent iphoneos)
+          SIM=$(ent iphonesimulator)
+          echo "device: $DEVICE"
+          echo "simulator: $SIM"
+          test -f "$DEVICE" && test -f "$SIM"
+          if /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.carplay-audio' "$DEVICE" >/dev/null 2>&1; then
+            echo "::error::Device builds must not request com.apple.developer.carplay-audio (Apple won't grant it)"
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.carplay-audio' "$SIM" >/dev/null
+
+      - name: Build for device (unsigned)
+        run: |
+          set -o pipefail
+          # Zero warnings: the app, widget and LyricsCore targets must build without any.
+          xcodebuild build -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
+            -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES | xcbeautify
+
+      - name: Test (unit + UI, demo mode)
+        run: |
+          set -o pipefail
+          xcodebuild test -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath TestResults.xcresult | xcbeautify
+
+      - name: Upload test results and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults
+          path: TestResults.xcresult
+          if-no-files-found: ignore

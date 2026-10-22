@@ -8,3 +8,8 @@ DEVELOPMENT_TEAM =
 
 // Change to something unique to you, e.g. com.lucas
 BUNDLE_ID_PREFIX = com.example
+
+// Shown in the app's About screen.
+PUBLISHER_NAME = YOUR_NAME
+// Leave empty to hide the support row. (xcconfig treats // as a comment, so no URLs here.)
+SUPPORT_EMAIL =

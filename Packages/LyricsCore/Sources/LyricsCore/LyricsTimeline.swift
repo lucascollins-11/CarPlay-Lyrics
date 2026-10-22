@@ -5,7 +5,10 @@ public struct LyricsTimeline: Equatable, Sendable {
     public let lines: [LyricLine]
 
     public init(lines: [LyricLine]) {
-        self.lines = lines.sorted { $0.time < $1.time }
+        // Stable sort: lines sharing a timestamp keep their order.
+        self.lines = lines.enumerated()
+            .sorted { $0.element.time == $1.element.time ? $0.offset < $1.offset : $0.element.time < $1.element.time }
+            .map(\.element)
     }
 
     public init(lrc: String) {
@@ -45,7 +48,8 @@ public struct LyricsTimeline: Equatable, Sendable {
     public func window(around index: Int?, before: Int, count: Int) -> (range: Range<Int>, current: Int?) {
         guard !lines.isEmpty, count > 0 else { return (0..<0, nil) }
         let anchor = index ?? 0
-        var start = max(0, anchor - before)
+        // Never let the lines above push the current line out of the window.
+        var start = max(0, anchor - min(before, count - 1))
         let end = min(lines.count, start + count)
         // Near the end of the song, pull the window back so it stays full.
         start = max(0, min(start, end - count))

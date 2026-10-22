@@ -3,129 +3,121 @@ import Combine
 import LyricsCore
 import UIKit
 
-/// Runs the CarPlay screen. Declared in Info.plist under
+/// Runs the CarPlay app screen. Declared in Info.plist under
 /// `CPTemplateApplicationSceneSessionRoleApplication`.
+///
+/// Apple's CarPlay guidelines don't allow lyrics on the CarPlay screen, so
+/// Apple won't grant this app a CarPlay entitlement and this screen only runs
+/// in the Simulator. In a real car, lyrics appear on the CarPlay Dashboard
+/// through the Drive mode Live Activity instead.
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interfaceController: CPInterfaceController?
     private var lyricsTemplate: CarPlayLyricsTemplate?
+    static let client = "carplay"
 
-    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                  didConnect interfaceController: CPInterfaceController) {
-        self.interfaceController = interfaceController
-        let template = CarPlayLyricsTemplate(model: .shared)
-        lyricsTemplate = template
-        interfaceController.setRootTemplate(template.template, animated: false, completion: nil)
-        NowPlayingModel.shared.setActive(true, client: "carplay")
-        NowPlayingModel.shared.refreshNow()
+    // CarPlay calls these on the main thread; the protocol just doesn't say so.
+    nonisolated func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
+                                              didConnect interfaceController: CPInterfaceController) {
+        // CarPlay hands this over on the main thread and nothing else keeps a reference.
+        nonisolated(unsafe) let controller = interfaceController
+        MainActor.assumeIsolated {
+            self.interfaceController = controller
+            let template = CarPlayLyricsTemplate(model: AppServices.shared.model)
+            lyricsTemplate = template
+            controller.setRootTemplate(template.template, animated: false, completion: nil)
+        }
     }
 
-    func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                  didDisconnectInterfaceController interfaceController: CPInterfaceController) {
-        NowPlayingModel.shared.setActive(false, client: "carplay")
-        lyricsTemplate = nil
-        self.interfaceController = nil
+    nonisolated func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
+                                              didDisconnectInterfaceController interfaceController: CPInterfaceController) {
+        MainActor.assumeIsolated {
+            AppServices.shared.model.setActive(false, client: Self.client)
+            lyricsTemplate = nil
+            self.interfaceController = nil
+        }
+    }
+
+    // Poll Spotify only while the lyrics screen is actually showing in the car,
+    // not while the driver has switched to Maps or Spotify.
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        AppServices.shared.model.setActive(true, client: Self.client)
+        AppServices.shared.model.refreshNow()
+    }
+
+    func sceneWillResignActive(_ scene: UIScene) {
+        AppServices.shared.model.setActive(false, client: Self.client)
     }
 }
 
-/// A list template that shows a few lines around the one being sung, with the
-/// current line marked by CarPlay's playing indicator.
+/// A list template showing a few lines around the one being sung, the current
+/// line marked with CarPlay's playing indicator. Rows aren't tappable: the
+/// driver never has to interact with it.
 @MainActor
 final class CarPlayLyricsTemplate {
     let template: CPListTemplate
     private let model: NowPlayingModel
     private var subscription: AnyCancellable?
+    private var items: [CPListItem] = []
+    private var header: String?
+    private var lastDisplay: LyricsDisplay?
 
     /// Lines kept above the current one, so the driver sees what was just sung.
-    private let linesBefore = 1
+    static let linesBefore = 1
 
     init(model: NowPlayingModel) {
         self.model = model
         template = CPListTemplate(title: "Lyrics", sections: [])
         template.trailingNavigationBarButtons = [
-            CPBarButton(title: "−0.25s") { _ in model.adjustOffset(by: -0.25) },
-            CPBarButton(title: "+0.25s") { _ in model.adjustOffset(by: 0.25) },
+            CPBarButton(title: "Earlier") { _ in model.adjustTrackOffset(by: 0.25) },
+            CPBarButton(title: "Later") { _ in model.adjustTrackOffset(by: -0.25) },
         ]
         subscription = model.$snapshot
             .removeDuplicates()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] snapshot in
-                self?.render(snapshot)
-            }
+            .sink { [weak self] snapshot in self?.render(snapshot) }
     }
 
-    private var maxItems: Int {
+    /// Some cars limit lists to 12 rows; fewer, larger rows are easier to read at a glance.
+    static var maxRows: Int {
         min(Int(CPListTemplate.maximumItemCount), 6)
     }
 
-    private func render(_ snapshot: NowPlayingModel.Snapshot) {
-        guard snapshot.isSignedIn else {
-            return showEmpty("Open CarPlay Lyrics on your iPhone", "Sign in to Spotify to get started.")
-        }
-        guard let track = snapshot.track else {
-            return showEmpty("Nothing playing", snapshot.problem ?? "Play a song on Spotify.")
-        }
-        let header = "\(track.title) · \(track.artistLine)"
+    func render(_ snapshot: NowPlayingSnapshot) {
+        let display = LyricsDisplay.make(for: snapshot, maxRows: Self.maxRows, linesBefore: Self.linesBefore)
+        guard display != lastDisplay else { return }
+        lastDisplay = display
 
-        switch snapshot.lyrics {
-        case .none, .loading:
-            showMessage("Finding lyrics…", header: header)
-        case .failed(let message):
-            showMessage(message, header: header)
-        case .loaded(.notFound):
-            showMessage("No lyrics found for this song", header: header)
-        case .loaded(.instrumental):
-            showMessage("♪ Instrumental ♪", header: header)
-        case .loaded(.plain(let lines)):
-            let items = lines.filter { !$0.isEmpty }.prefix(maxItems).map { makeItem($0, isCurrent: false) }
-            template.updateSections([CPListSection(items: Array(items), header: "\(header) (not synced)", sectionIndexTitle: nil)])
-        case .loaded(.synced(let timeline)):
-            let window = timeline.window(around: snapshot.currentLine, before: linesBefore, count: maxItems)
-            var items: [CPListItem] = []
-            if snapshot.currentLine == nil {
-                // Before the first line: show a waiting marker, then what's coming.
-                items.append(makeItem("♪", isCurrent: true))
+        switch display {
+        case .message(let title, let subtitle):
+            template.emptyViewTitleVariants = [title]
+            template.emptyViewSubtitleVariants = subtitle.map { [$0] } ?? []
+            items = []
+            header = nil
+            template.updateSections([])
+        case .rows(let newHeader, let rows):
+            if newHeader == header, rows.count == items.count {
+                // Same shape: update rows in place, which avoids the list flickering on some head units.
+                for (item, row) in zip(items, rows) {
+                    if item.text != row.text { item.setText(row.text) }
+                    if item.detailText != row.detail { item.setDetailText(row.detail) }
+                    if item.isPlaying != row.isCurrent { item.isPlaying = row.isCurrent }
+                }
+            } else {
+                items = rows.map(Self.makeItem)
+                header = newHeader
+                template.updateSections([CPListSection(items: items, header: newHeader, sectionIndexTitle: nil)])
             }
-            for index in window.range where items.count < maxItems {
-                let line = timeline.lines[index]
-                items.append(makeItem(line.isGap ? "♪" : line.text, isCurrent: index == snapshot.currentLine))
-            }
-            template.updateSections([CPListSection(items: items, header: header, sectionIndexTitle: nil)])
         }
     }
 
-    private func makeItem(_ text: String, isCurrent: Bool) -> CPListItem {
-        // CarPlay rows truncate, so a long line wraps onto the detail row.
-        let (first, rest) = Self.split(text, limit: 34)
-        let item = CPListItem(text: first, detailText: rest)
-        item.isPlaying = isCurrent
+    static func makeItem(_ row: LyricsRow) -> CPListItem {
+        let item = CPListItem(text: row.text, detailText: row.detail)
+        item.isPlaying = row.isCurrent
         item.playingIndicatorLocation = .leading
-        item.handler = { _, completion in completion() }
         return item
     }
 
-    private func showMessage(_ message: String, header: String) {
-        template.updateSections([CPListSection(items: [makeItem(message, isCurrent: false)], header: header, sectionIndexTitle: nil)])
-    }
-
-    private func showEmpty(_ title: String, _ subtitle: String) {
-        template.emptyViewTitleVariants = [title]
-        template.emptyViewSubtitleVariants = [subtitle]
-        template.updateSections([])
-    }
-
-    /// Splits `text` at a word boundary near `limit` characters.
-    static func split(_ text: String, limit: Int) -> (String, String?) {
-        guard text.count > limit else { return (text, nil) }
-        let words = text.split(separator: " ")
-        var first = ""
-        var index = 0
-        while index < words.count {
-            let candidate = first.isEmpty ? String(words[index]) : first + " " + String(words[index])
-            if candidate.count > limit, !first.isEmpty { break }
-            first = candidate
-            index += 1
-        }
-        let rest = words[index...].joined(separator: " ")
-        return (first, rest.isEmpty ? nil : rest)
+    /// The rows currently on screen, for tests.
+    var visibleRows: [(text: String?, detail: String?, isCurrent: Bool)] {
+        items.map { ($0.text, $0.detailText, $0.isPlaying) }
     }
 }
