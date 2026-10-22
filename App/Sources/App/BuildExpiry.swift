@@ -61,10 +61,10 @@ extension BuildExpiry.Status {
         case .unknown, .valid: return nil
         case .expiringSoon(_, let daysLeft):
             return daysLeft <= 1
-                ? "This build of Lyrics stops opening within a day. Reinstall it from Xcode before your next drive."
-                : "This build of Lyrics stops opening in \(daysLeft) days. Reinstall it from Xcode before then."
+                ? "This build of Lyrics stops opening within a day. Reinstall it (Sideloadly or Xcode) before your next drive."
+                : "This build of Lyrics stops opening in \(daysLeft) days. Reinstall it (Sideloadly or Xcode) before then."
         case .expired:
-            return "This build of Lyrics has expired. Reinstall it from Xcode."
+            return "This build of Lyrics has expired. Reinstall it with Sideloadly or Xcode."
         }
     }
 
@@ -99,7 +99,7 @@ enum BuildExpiryReminder {
             guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
             let content = UNMutableNotificationContent()
             content.title = "Lyrics expires tomorrow"
-            content.body = "Reinstall it from Xcode so it still opens in the car."
+            content.body = "Reinstall it (Sideloadly or Xcode) so it still opens in the car."
             let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fireAt)
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
             try? await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))

@@ -1,0 +1,142 @@
+name: iPhone build
+
+# Builds the app for a real iPhone on a GitHub macOS runner, so no Mac is needed.
+# Run it from the Actions tab: "iPhone build" > "Run workflow". See SETUP.md, "No Mac?".
+#
+#   sideload    An unsigned CarPlayLyrics.ipa in the run's artifacts. Install it with
+#               Sideloadly (Windows or Mac) and a free or paid Apple ID.
+#   testflight  Signed by Apple's cloud signing and uploaded to TestFlight. Needs a paid
+#               Apple Developer account and the APPLE_TEAM_ID / ASC_* settings below.
+#
+# Repository settings (Settings > Secrets and variables > Actions):
+#   Variables: SPOTIFY_CLIENT_ID, BUNDLE_ID_PREFIX (e.g. com.lucas), PUBLISHER_NAME,
+#              APPLE_TEAM_ID (TestFlight only)
+#   Secrets (TestFlight only): ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (the .p8 file's text)
+
+on:
+  workflow_dispatch:
+    inputs:
+      destination:
+        description: Where the build goes
+        type: choice
+        options: [sideload, testflight]
+        default: sideload
+  # Proves the sideload build still works when this workflow changes.
+  pull_request:
+    paths: [.github/workflows/iphone.yml]
+
+env:
+  SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID || 'YOUR_SPOTIFY_CLIENT_ID' }}
+  BUNDLE_ID_PREFIX: ${{ vars.BUNDLE_ID_PREFIX || 'com.example' }}
+  PUBLISHER_NAME: ${{ vars.PUBLISHER_NAME || 'YOUR_NAME' }}
+
+jobs:
+  build:
+    name: Build (${{ inputs.destination || 'sideload' }})
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest Xcode on the runner
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Check settings
+        env:
+          DESTINATION: ${{ inputs.destination || 'sideload' }}
+          TEAM: ${{ vars.APPLE_TEAM_ID }}
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+          KEY: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          if [ "$SPOTIFY_CLIENT_ID" = YOUR_SPOTIFY_CLIENT_ID ]; then
+            echo "::warning::The SPOTIFY_CLIENT_ID variable isn't set, so this build can only play the demo song."
+          fi
+          if [ "$BUNDLE_ID_PREFIX" = com.example ]; then
+            echo "::warning::The BUNDLE_ID_PREFIX variable isn't set; using com.example."
+          fi
+          if [ "$DESTINATION" = testflight ]; then
+            missing=""
+            [ -n "$TEAM" ] || missing="$missing APPLE_TEAM_ID(variable)"
+            [ -n "$KEY_ID" ] || missing="$missing ASC_KEY_ID"
+            [ -n "$ISSUER" ] || missing="$missing ASC_ISSUER_ID"
+            [ -n "$KEY" ] || missing="$missing ASC_KEY_P8"
+            if [ -n "$missing" ]; then
+              echo "::error::TestFlight needs these repository settings:$missing. See SETUP.md, 'No Mac?'."
+              exit 1
+            fi
+          fi
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen xcbeautify
+          xcodegen generate
+
+      # Archived without signing. Sideloadly signs the sideload build with your Apple ID;
+      # for TestFlight, the export step below has Apple sign it. The device entitlements
+      # file is empty (no CarPlay entitlement), so nothing is lost by signing later.
+      - name: Archive (unsigned)
+        env:
+          TEAM: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          xcodebuild archive -project CarPlayLyrics.xcodeproj -scheme CarPlayLyrics \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath build/CarPlayLyrics.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            SPOTIFY_CLIENT_ID="$SPOTIFY_CLIENT_ID" BUNDLE_ID_PREFIX="$BUNDLE_ID_PREFIX" \
+            PUBLISHER_NAME="$PUBLISHER_NAME" DEVELOPMENT_TEAM="$TEAM" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" | xcbeautify
+
+      - name: Package the .ipa for sideloading
+        if: ${{ (inputs.destination || 'sideload') == 'sideload' }}
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/CarPlayLyrics.xcarchive/Products/Applications/CarPlayLyrics.app build/ipa/Payload/
+          test -d build/ipa/Payload/CarPlayLyrics.app/PlugIns/LyricsWidget.appex
+          (cd build/ipa && zip -qry ../CarPlayLyrics.ipa Payload)
+          ls -l build/CarPlayLyrics.ipa
+
+      - name: Upload the .ipa
+        if: ${{ (inputs.destination || 'sideload') == 'sideload' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarPlayLyrics-ipa
+          path: build/CarPlayLyrics.ipa
+          retention-days: 30
+
+      - name: Sign with Apple cloud signing and upload to TestFlight
+        if: ${{ inputs.destination == 'testflight' }}
+        env:
+          TEAM: ${{ vars.APPLE_TEAM_ID }}
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+          KEY: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -o pipefail
+          KEY_PATH="$RUNNER_TEMP/AuthKey_$KEY_ID.p8"
+          printf '%s\n' "$KEY" > "$KEY_PATH"
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>$TEAM</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>testFlightInternalTestingOnly</key><true/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive -archivePath build/CarPlayLyrics.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist -exportPath build/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER" | xcbeautify
+          rm -f "$KEY_PATH"
+          echo "Uploaded build ${{ github.run_number }}. It shows up in TestFlight on your iPhone after Apple processes it (usually 5 to 30 minutes)."
