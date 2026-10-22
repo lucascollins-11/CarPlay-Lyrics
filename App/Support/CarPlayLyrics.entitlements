@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- CarPlay audio app. Works in the Simulator as is; a real car needs Apple to grant this entitlement to your team. -->
+	<key>com.apple.developer.carplay-audio</key>
+	<true/>
+</dict>
+</plist>

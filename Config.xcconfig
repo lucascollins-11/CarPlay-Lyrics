@@ -1,0 +1,10 @@
+// Fill these in before building. See SETUP.md.
+
+// Client ID of your app at https://developer.spotify.com/dashboard
+SPOTIFY_CLIENT_ID = YOUR_SPOTIFY_CLIENT_ID
+
+// Your Apple Developer Team ID (Xcode > Settings > Accounts). Leave empty for the Simulator.
+DEVELOPMENT_TEAM =
+
+// Change to something unique to you, e.g. com.lucas
+BUNDLE_ID_PREFIX = com.example
