@@ -23,9 +23,22 @@ public struct NowPlayingTrack: Equatable, Hashable, Sendable, Codable {
     public var artistLine: String { artists.joined(separator: ", ") }
 }
 
+/// What Spotify is playing, from `currently_playing_type`. Only `.track` has lyrics.
+public enum PlayingKind: String, Equatable, Sendable {
+    /// Nothing is playing (204, or no item).
+    case nothing
+    case track
+    case episode
+    case ad
+    /// Something Spotify doesn't describe, or a track the app can't identify.
+    case unknown
+}
+
 /// What `GET /v1/me/player/currently-playing` reports.
 public struct PlaybackSample: Equatable, Sendable {
     public var track: NowPlayingTrack?
+    /// Why `track` is nil when something is playing: a podcast episode, an ad, or something else.
+    public var kind: PlayingKind
     /// Position in seconds.
     public var position: TimeInterval
     public var isPlaying: Bool
@@ -35,9 +48,10 @@ public struct PlaybackSample: Equatable, Sendable {
     public var requestStart: TimeInterval?
     public var requestEnd: TimeInterval?
 
-    public init(track: NowPlayingTrack?, position: TimeInterval, isPlaying: Bool,
+    public init(track: NowPlayingTrack?, position: TimeInterval, isPlaying: Bool, kind: PlayingKind? = nil,
                 requestStart: TimeInterval? = nil, requestEnd: TimeInterval? = nil) {
         self.track = track
+        self.kind = kind ?? (track == nil ? .nothing : .track)
         self.position = position
         self.isPlaying = isPlaying
         self.requestStart = requestStart
@@ -54,9 +68,16 @@ public struct PlaybackSample: Equatable, Sendable {
     public static func decode(_ data: Data) throws -> PlaybackSample {
         let response = try JSONDecoder().decode(CurrentlyPlayingResponse.self, from: data)
         let position = TimeInterval(response.progress_ms ?? 0) / 1000
-        let isTrack = (response.currently_playing_type ?? "track") == "track"
-        let track = isTrack ? response.item?.track : nil
-        return PlaybackSample(track: track, position: position, isPlaying: response.is_playing ?? false)
+        let type = response.currently_playing_type ?? "track"
+        let track = type == "track" ? response.item?.track : nil
+        let kind: PlayingKind
+        switch type {
+        case "track": kind = track != nil ? .track : (response.item == nil ? .nothing : .unknown)
+        case "episode": kind = .episode
+        case "ad": kind = .ad
+        default: kind = .unknown
+        }
+        return PlaybackSample(track: track, position: position, isPlaying: response.is_playing ?? false, kind: kind)
     }
 }
 

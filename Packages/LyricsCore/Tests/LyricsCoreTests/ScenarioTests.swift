@@ -39,6 +39,7 @@ final class ScenarioTests: XCTestCase {
         var engine = NowPlayingEngine(isSignedIn: true)
         let episode = try await sample(body(item: item(id: "ep1", name: "Episode", type: "episode"), progressMs: 5000, type: "episode"))
         XCTAssertNil(episode.track)
+        XCTAssertEqual(episode.kind, .episode)
         XCTAssertEqual(engine.apply(episode, at: 10), [])
         XCTAssertNil(engine.snapshot.track)
         XCTAssertEqual(engine.snapshot.lyrics, .none)
@@ -52,6 +53,7 @@ final class ScenarioTests: XCTestCase {
 
         let ad = try await sample(body(item: nil, progressMs: 0, type: "ad"))
         XCTAssertNil(ad.track)
+        XCTAssertEqual(ad.kind, .ad)
         _ = engine.apply(ad, at: 101.5)
         XCTAssertEqual(engine.snapshot.track?.id, "a", "one empty answer must not blank the lyrics")
         _ = engine.apply(ad, at: 103)
@@ -84,6 +86,8 @@ final class ScenarioTests: XCTestCase {
         // 200 with no item.
         let noItem = try await sample(#"{"is_playing":true,"currently_playing_type":"unknown","item":null}"#)
         XCTAssertNil(noItem.track)
+        XCTAssertEqual(noItem.kind, .unknown)
+        XCTAssertEqual(empty.kind, .nothing)
         // Neither flips a playing song to "nothing" on the first answer; two do.
         var engine = NowPlayingEngine(isSignedIn: true)
         _ = engine.apply(try await sample(body(item: item(), progressMs: 5000)), at: 10)
@@ -342,6 +346,27 @@ final class RequestTimingTests: XCTestCase {
         }
         let again = try await SpotifyWebAPI(http: reversed, now: { clock.now() }) { _ in "t" }.currentlyPlaying()
         XCTAssertEqual((again.requestEnd ?? 0) - (again.requestStart ?? 0), 3, accuracy: 0.0001)
+    }
+}
+
+final class PlayingKindTests: XCTestCase {
+    func kind(_ json: String) throws -> PlayingKind { try PlaybackSample.decode(Data(json.utf8)).kind }
+
+    func testKindsFromCurrentlyPlayingType() throws {
+        XCTAssertEqual(try kind(#"{"is_playing":true,"currently_playing_type":"track","item":{"id":"a","name":"A"}}"#), .track)
+        XCTAssertEqual(try kind(#"{"is_playing":true,"item":{"id":"a","name":"A"}}"#), .track, "type is optional")
+        XCTAssertEqual(try kind(#"{"is_playing":true,"currently_playing_type":"episode","item":{"id":"e","name":"E","type":"episode"}}"#), .episode)
+        XCTAssertEqual(try kind(#"{"is_playing":true,"currently_playing_type":"ad","item":null}"#), .ad)
+        XCTAssertEqual(try kind(#"{"is_playing":true,"currently_playing_type":"unknown","item":null}"#), .unknown)
+        XCTAssertEqual(try kind(#"{"is_playing":false,"currently_playing_type":"track","item":null}"#), .nothing)
+        // A track Spotify gives no ID for (and that isn't a local file) can't be used.
+        XCTAssertEqual(try kind(#"{"is_playing":true,"currently_playing_type":"track","item":{"name":"Mystery"}}"#), .unknown)
+    }
+
+    func testPlaybackSampleDefaultsKeepOldCallersWorking() {
+        XCTAssertEqual(PlaybackSample(track: nil, position: 0, isPlaying: false).kind, .nothing)
+        XCTAssertEqual(PlaybackSample(track: makeTrack(), position: 0, isPlaying: true).kind, .track)
+        XCTAssertEqual(PlaybackSample.nothing.kind, .nothing)
     }
 }
 
