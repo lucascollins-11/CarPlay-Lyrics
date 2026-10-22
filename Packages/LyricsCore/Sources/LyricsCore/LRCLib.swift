@@ -182,8 +182,10 @@ public struct LRCLibClient: Sendable {
         do {
             results = try await search(title: simplified, artist: track.primaryArtist)
             titleSearchWorked = true
-            if let best = Self.bestMatch(in: results, for: track), Self.isSynced(best, for: track) {
-                return best
+            if let best = Self.bestMatch(in: results, for: track) {
+                if Self.isSynced(best, for: track) { return best }
+                // The song itself is on LRCLIB, just without synced lyrics: a looser search won't do better.
+                if Self.hasExactTitle(best, for: track) { return best }
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -193,13 +195,14 @@ public struct LRCLibClient: Sendable {
 
         do {
             results += try await search(query: "\(simplified) \(track.primaryArtist)")
-            lastError = nil
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            // A failed extra search doesn't turn the title search's "nothing found" into an error.
-            if titleSearchWorked { lastError = nil } else { lastError = error }
+            if !titleSearchWorked { lastError = error }
         }
+        // Only a working title search makes "nothing found" an answer. If it failed (offline),
+        // a miss here must stay an error so the lookup is retried instead of remembered.
+        if titleSearchWorked { lastError = nil }
         if let best = Self.bestMatch(in: results, for: track), Self.isSynced(best, for: track) || fallback == nil {
             return best
         }
@@ -207,6 +210,11 @@ public struct LRCLibClient: Sendable {
         if let fallback { return fallback }
         if let lastError { throw lastError }
         return nil
+    }
+
+    static func hasExactTitle(_ record: LRCLibRecord, for track: NowPlayingTrack) -> Bool {
+        TitleNormalizer.comparable(TitleNormalizer.simplify(record.trackName ?? ""))
+            == TitleNormalizer.comparable(TitleNormalizer.simplify(track.title))
     }
 
     static func isSynced(_ record: LRCLibRecord, for track: NowPlayingTrack) -> Bool {
@@ -282,25 +290,40 @@ public struct LRCLibClient: Sendable {
         else { return nil }
 
         let artist = TitleNormalizer.comparable(record.artistName ?? "")
-        guard !artist.isEmpty, wantedArtists.contains(where: { artist.contains($0) || $0.contains(artist) }) else {
-            return nil
-        }
+        guard !artist.isEmpty else { return nil }
         let durationGap = abs((record.duration ?? track.duration) - track.duration)
         // A different cut of the song (live, extended) has different timings.
         guard durationGap <= 5 else { return nil }
 
         var value = 0.0
+        if !wantedArtists.contains(where: { artist.contains($0) || $0.contains(artist) }) {
+            // The same artist written in another script ("Kenshi Yonezu" vs "米津玄師") can't be
+            // compared. Accept it only with the exact title and nearly the same length, ranked lower.
+            guard title == wantedTitle, durationGap <= 2,
+                  wantedArtists.contains(where: { Self.differentScripts($0, artist) })
+            else { return nil }
+            value -= 50
+        }
+
         switch Lyrics(record: record, trackDuration: track.duration) {
         case .synced: value += 100
         case .plain: value += 40
         case .instrumental: value += 20
-        case .notFound: break
+        // Nothing to show: never let it beat a record that has lyrics.
+        case .notFound: return nil
         }
         // The exact title outranks everything else: "Stay" with plain lyrics is right for "Stay",
         // "Stay With Me" with synced lyrics is another song.
         if title == wantedTitle { value += 200 }
         value -= durationGap * 4
         return value
+    }
+
+    /// True when one name is plain Latin letters and digits and the other has none of them.
+    static func differentScripts(_ a: String, _ b: String) -> Bool {
+        func isLatin(_ text: String) -> Bool { text.unicodeScalars.allSatisfy(\.isASCII) }
+        func hasLatin(_ text: String) -> Bool { text.unicodeScalars.contains(where: \.isASCII) }
+        return (isLatin(a) && !hasLatin(b)) || (isLatin(b) && !hasLatin(a))
     }
 
     /// Picks the search result that best fits the track: same title and

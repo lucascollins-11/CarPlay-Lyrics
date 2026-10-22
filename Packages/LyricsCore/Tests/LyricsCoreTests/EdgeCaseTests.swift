@@ -148,6 +148,37 @@ final class MatchingEdgeCaseTests: XCTestCase {
         XCTAssertEqual(LRCLibClient.bestMatch(in: records, for: track)?.id, 2)
     }
 
+    // EC31
+    func testExactTitleWithoutAnyLyricsDoesNotBeatAPrefixMatchWithLyrics() {
+        let track = makeTrack(title: "Title", artists: ["Artist"], duration: 200)
+        let records = [
+            LRCLibRecord(id: 1, trackName: "Title", artistName: "Artist", duration: 200),
+            LRCLibRecord(id: 2, trackName: "Title Reprise", artistName: "Artist", duration: 200, syncedLyrics: "[00:01.00]x"),
+        ]
+        XCTAssertEqual(LRCLibClient.bestMatch(in: records, for: track)?.id, 2)
+        XCTAssertNil(LRCLibClient.bestMatch(in: [records[0]], for: track))
+    }
+
+    // EC32
+    func testArtistInAnotherScriptMatchesOnlyWithExactTitleAndLength() {
+        let track = makeTrack(title: "Lemon", artists: ["Kenshi Yonezu"], duration: 255)
+        let native = LRCLibRecord(id: 1, trackName: "Lemon", artistName: "米津玄師", duration: 255.5, syncedLyrics: "[00:01.00]x")
+        XCTAssertEqual(LRCLibClient.bestMatch(in: [native], for: track)?.id, 1)
+
+        var otherLength = native
+        otherLength.duration = 259
+        XCTAssertNil(LRCLibClient.bestMatch(in: [otherLength], for: track))
+        var otherTitle = native
+        otherTitle.trackName = "Lemonade"
+        XCTAssertNil(LRCLibClient.bestMatch(in: [otherTitle], for: track))
+        // A different artist in the same script is still a different song.
+        let cover = LRCLibRecord(id: 2, trackName: "Lemon", artistName: "Somebody Else", duration: 255, syncedLyrics: "[00:01.00]x")
+        XCTAssertNil(LRCLibClient.bestMatch(in: [cover], for: track))
+        // A record by the right artist name still wins over the cross-script one.
+        let romanized = LRCLibRecord(id: 3, trackName: "Lemon", artistName: "Kenshi Yonezu", duration: 257, syncedLyrics: "[00:01.00]x")
+        XCTAssertEqual(LRCLibClient.bestMatch(in: [native, romanized], for: track)?.id, 3)
+    }
+
     func testPrefixMatchIsUsedWhenNothingExactExists() {
         let track = makeTrack(title: "Stay", artists: ["Artist"], duration: 200)
         let records = [LRCLibRecord(id: 1, trackName: "Stay (Interlude)", artistName: "Artist", duration: 200, syncedLyrics: "[00:01.00]x")]
@@ -198,6 +229,33 @@ final class MatchingEdgeCaseTests: XCTestCase {
         XCTAssertNil(record)
     }
 
+    func testOfflineTitleSearchWithEmptyFreeTextSearchStillThrows() async {
+        // Dead zone: the title search fails; a "nothing found" from another request must not
+        // be remembered as "no lyrics" for the rest of the drive.
+        let track = makeTrack(title: "Song", artists: ["Artist"], duration: 200)
+        let http = StubHTTP { request in
+            if request.query["q"] != nil { return (200, json("[]"), [:]) }
+            throw URLError(.notConnectedToInternet)
+        }
+        do {
+            _ = try await LRCLibClient(http: http).lyrics(for: track)
+            XCTFail("expected an error")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet)
+        }
+    }
+
+    func testNoFreeTextSearchWhenTitleSearchFoundTheSongWithPlainLyrics() async throws {
+        let track = makeTrack(title: "Song", artists: ["Artist"], duration: 200)
+        let plain = #"{"id":3,"trackName":"Song","artistName":"Artist","duration":200,"plainLyrics":"p"}"#
+        let http = StubHTTP { request in
+            request.path == "/api/get" ? (404, Data(), [:]) : (200, json("[\(plain)]"), [:])
+        }
+        let record = try await LRCLibClient(http: http).lyrics(for: track)
+        XCTAssertEqual(record?.id, 3)
+        XCTAssertFalse(http.requests.contains { $0.query["q"] != nil })
+    }
+
     func testPlainExactHitIsKeptWhenFreeTextOnlyFindsPlainToo() async throws {
         let track = makeTrack(title: "Song", artists: ["Artist"], duration: 200)
         let plain = #"{"id":1,"trackName":"Song","artistName":"Artist","duration":200,"plainLyrics":"p"}"#
@@ -220,12 +278,12 @@ final class NonLatinTextTests: XCTestCase {
         let lines = LRCParser.parse("[00:01.00]사랑해\n[00:02.00]Привет, мир\n[00:03.00]حبيبي يا نور العين")
         XCTAssertEqual(lines.map(\.text), ["사랑해", "Привет, мир", "حبيبي يا نور العين"])
         let track = makeTrack(title: "Кино", artists: ["Группа крови"], duration: 200)
-        XCTAssertNotNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "кино", artistName: "ГРУППА КРОВИ", duration: 200), for: track))
+        XCTAssertNotNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "кино", artistName: "ГРУППА КРОВИ", duration: 200, plainLyrics: "x"), for: track))
     }
 
     func testAccentsAndFullWidthFoldTogether() {
         let track = makeTrack(title: "Beyoncé Song", artists: ["Beyoncé"], duration: 200)
-        XCTAssertNotNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "Beyonce Song", artistName: "BEYONCE", duration: 200), for: track))
+        XCTAssertNotNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "Beyonce Song", artistName: "BEYONCE", duration: 200, plainLyrics: "x"), for: track))
         XCTAssertEqual(TitleNormalizer.comparable("ＡＢＣ"), "abc")
         // Decomposed (e + combining accent) and precomposed é compare equal.
         XCTAssertEqual(TitleNormalizer.comparable("Cafe\u{301}"), TitleNormalizer.comparable("Café"))
@@ -234,7 +292,7 @@ final class NonLatinTextTests: XCTestCase {
     func testEmojiAndSymbolOnlyTitles() {
         // A title made only of punctuation or emoji has nothing to compare: no match rather than a crash.
         let track = makeTrack(title: "♡", artists: ["Artist"], duration: 200)
-        XCTAssertNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "♡", artistName: "Artist", duration: 200), for: track))
+        XCTAssertNil(LRCLibClient.score(LRCLibRecord(id: 1, trackName: "♡", artistName: "Artist", duration: 200, plainLyrics: "x"), for: track))
         let lines = LRCParser.parse("[00:01.00]🔥🔥🔥 la la 🎶")
         XCTAssertEqual(lines.first?.text, "🔥🔥🔥 la la 🎶")
     }

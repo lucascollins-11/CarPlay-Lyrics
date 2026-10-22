@@ -66,7 +66,8 @@ public enum LRCParser {
 
     /// Turns `\r\n` and lone `\r` into `\n`, so splitting on newlines never yields extra blank lines.
     public static func normalizeLineEndings(_ text: String) -> String {
-        guard text.contains("\r") else { return text }
+        // Check scalars: "\r\n" is a single Character, so String.contains("\r") misses it.
+        guard text.unicodeScalars.contains("\r") else { return text }
         return text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     }
 
