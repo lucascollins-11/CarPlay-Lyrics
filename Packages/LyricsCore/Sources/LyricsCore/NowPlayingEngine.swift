@@ -67,6 +67,8 @@ public struct NowPlayingEngine: Sendable {
     public private(set) var snapshot: NowPlayingSnapshot
     public private(set) var clock: PlaybackClock?
     private var lastTickAt: TimeInterval?
+    /// When recent answers arrived (last 10 s), to cap quick confirm polls.
+    private var sampleTimes: [TimeInterval] = []
     /// Seconds added to every song's position before picking a line (for
     /// example to make up for Bluetooth delay). Positive shows lyrics earlier.
     public var globalOffset: TimeInterval
@@ -96,6 +98,9 @@ public struct NowPlayingEngine: Sendable {
     public static let rewindConfirmDelay: TimeInterval = 0.4
     /// The answers so far allow more than this (seconds) of uncertainty: the position isn't pinned down yet.
     public static let vagueBoundsWidth: TimeInterval = 0.4
+    public static let quickConfirmWindow: TimeInterval = 10
+    /// Normal pace is about 7 answers per 10 s (1.5 s polls); quick confirms may add about 2.
+    public static let maxSamplesPerQuickConfirmWindow = 9
     /// The last position Spotify reported while saying it was playing, to notice a frozen position.
     private var lastPlayingPosition: TimeInterval?
     private var lastPlayingAt: TimeInterval?
@@ -187,6 +192,7 @@ public struct NowPlayingEngine: Sendable {
         consecutiveFailures = 0
         consecutiveUnauthorized = 0
         snapshot.problem = nil
+        sampleTimes = sampleTimes.filter { time - $0 < Self.quickConfirmWindow } + [time]
 
         guard let track = sample.track else {
             if snapshot.track == nil { snapshot.playingKind = sample.kind }
@@ -464,6 +470,12 @@ public struct NowPlayingEngine: Sendable {
     }
 
     /// How long to wait before asking Spotify again.
+    /// At most `maxQuickConfirms` 0.4 s polls per `quickConfirmWindow`, so answers that keep
+    /// flipping between fresh and stale can't double the request rate.
+    func quickConfirmsAllowed(at time: TimeInterval) -> Bool {
+        sampleTimes.filter { time - $0 < Self.quickConfirmWindow }.count < Self.maxSamplesPerQuickConfirmWindow
+    }
+
     public func nextPollDelay(at time: TimeInterval) -> TimeInterval {
         guard snapshot.track != nil, let clock else {
             return time < fastPollUntil ? 2 : 6
@@ -474,12 +486,13 @@ public struct NowPlayingEngine: Sendable {
         if time < fastPollUntil {
             delay = min(delay, Self.fastPollInterval)
             // Just after a change, until an answer has pinned the new position down, ask sooner still.
-            if clock.isPlaying, clock.offsetBounds.upperBound - clock.offsetBounds.lowerBound > Self.vagueBoundsWidth {
+            if clock.isPlaying, clock.offsetBounds.upperBound - clock.offsetBounds.lowerBound > Self.vagueBoundsWidth,
+               quickConfirmsAllowed(at: time) {
                 delay = min(delay, Self.rewindConfirmDelay)
             }
         }
         // One answer said "back": confirm it (or not) quickly, so a real seek back isn't a poll late.
-        if clock.pendingRewind != nil, time >= slowPollingUntil {
+        if clock.pendingRewind != nil, time >= slowPollingUntil, quickConfirmsAllowed(at: time) {
             delay = min(delay, Self.rewindConfirmDelay)
         }
         // Ask again just after the song should end, to catch the next one quickly. Once the clock

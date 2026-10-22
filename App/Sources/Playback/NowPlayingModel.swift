@@ -223,7 +223,7 @@ final class NowPlayingModel: ObservableObject {
                                  uncertainty: max(0, requestEnd - requestStart) / 2))
             publish()
             wakeTick()
-            return engine.nextPollDelay(at: deps.now())
+            return Self.easedForDevice(engine.nextPollDelay(at: deps.now()))
         } catch {
             guard generation == sourceGeneration else { return 0 }
             let delay = engine.pollFailed(error, at: deps.now())
@@ -271,9 +271,22 @@ final class NowPlayingModel: ObservableObject {
     }
 
     /// Fetches lyrics for the next couple of songs so they show instantly, even with patchy signal.
+    /// A hot iPhone (in a mount in the sun) or Low Power Mode: poll less often (EC13). Song changes
+    /// then show a little later; lyrics still follow the song in between.
+    static func easedForDevice(_ delay: TimeInterval, info: ProcessInfo = .processInfo) -> TimeInterval {
+        if info.thermalState == .serious || info.thermalState == .critical { return max(delay, 5) }
+        if info.isLowPowerModeEnabled { return max(delay, 3) }
+        return delay
+    }
+
+    private static var deviceIsStrained: Bool {
+        let info = ProcessInfo.processInfo
+        return info.isLowPowerModeEnabled || info.thermalState == .serious || info.thermalState == .critical
+    }
+
     private func prefetchUpcoming() {
-        // Prefetching is optional; don't spend Spotify's rate limit on it while it's tight.
-        guard !isDemo, !engine.isRateLimited(at: deps.now()) else { return }
+        // Prefetching is optional; don't spend Spotify's rate limit, or a hot phone's battery, on it.
+        guard !isDemo, !engine.isRateLimited(at: deps.now()), !Self.deviceIsStrained else { return }
         prefetchTask?.cancel()
         let source = self.source
         let provider = lyricsProvider

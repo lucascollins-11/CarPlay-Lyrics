@@ -113,7 +113,8 @@ public struct PlaybackClock: Equatable, Sendable {
             } ?? false
             // Back to the start is a restart ("Previous" on the steering wheel, repeat-one), not a
             // stale answer: those are a second or two old, never minutes.
-            let restart = position < Self.restartWindow
+            // Only from well into the song: in the intro a stale answer can also land near the start.
+            let restart = position < Self.restartWindow && predicted - position > 2 * Self.restartWindow
             if !agrees, !restart {
                 pendingRewind = (position, time)
                 return false

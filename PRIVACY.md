@@ -10,6 +10,7 @@ Lyrics ("CarPlay Lyrics", "the app") shows time-synced lyrics for the song playi
 - If you turn on "Tap a line to jump there" in Settings, the app also asks for permission to control playback (`user-modify-playback-state`). It uses it only to jump to the line you tap.
 - Sign-in uses Spotify's PKCE flow. The resulting tokens are stored in the iOS Keychain on this iPhone only (not synced to iCloud or restored to other devices), and are only ever sent to Spotify.
 - While the app is open, or Drive mode is on, it asks Spotify every few seconds what is playing: the song's title, artists, album, length, Spotify track ID, playback position and artwork address.
+- When you open Settings, the app reads your Spotify display name (`GET /v1/me`) to show "Signed in as …". It is kept only in memory while Settings is open; it isn't saved, logged or sent anywhere.
 
 ## What the app sends to others
 
@@ -20,7 +21,8 @@ Lyrics ("CarPlay Lyrics", "the app") shows time-synced lyrics for the song playi
 ## What stays on your iPhone
 
 - Lyrics you've seen, and the versions you picked with "Wrong lyrics?", saved in the app's own storage on this iPhone so songs load instantly and offline. They are excluded from iCloud and computer backups. "Delete my data" removes them.
-- Your settings, such as timing adjustments per song, text size and Drive mode, saved in the app's preferences.
+- Your settings, such as timing adjustments per song and per audio output (car, Bluetooth, AirPlay, wired, speaker), how early Drive mode sends lines, text size and Drive mode, saved in the app's preferences.
+- Notifications: when you first start Drive mode, the app asks permission to send notifications. It uses it only for one local reminder the day before a sideloaded build expires. The reminder is scheduled on this iPhone; nothing is sent off the device.
 - While Drive mode is on, a Live Activity with the current lyric line, which iOS shows on the Lock Screen, in the Dynamic Island and on the CarPlay Dashboard.
 
 ## Cookies and tracking
