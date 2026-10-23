@@ -202,6 +202,15 @@ These can only be measured on a real iPhone in a real car. Pass/fail thresholds:
 | 15 | A long drive on a hot day, phone in a mount in the sun | Lyrics keep updating; note if iOS shows a temperature warning |
 | 16 | Tune Settings > Drive mode > **Send lines early** until the Dashboard line changes with the singer | Record the value (and the car) in your report |
 | 17 | Turn Driving Focus on, then start Drive mode | The tile still appears on the Dashboard; if it doesn't, record which Focus settings hid it |
+| 18 | Note cellular data used by Lyrics over a 1-hour drive (Settings > Cellular, reset statistics first) | Under ~10 MB (estimate below); report the number |
+
+**Mobile data (estimate, to be confirmed by row 18):** while a song plays and lyrics are on
+screen or Drive mode is on, the app asks Spotify what's playing every 1.5 s, about 2,400
+times an hour. Each answer is roughly 3–8 KB of JSON (most of it the song's list of
+markets), sent compressed, so about 1.5–3 KB each with headers. That is roughly **4–8 MB
+an hour**, plus a few KB per new song for lyrics. Paused, it asks every 5 s; with nothing
+showing lyrics it doesn't ask at all. When the phone is hot or in Low Power Mode it slows to
+every 3–5 s.
 
 If #2 fails (updates throttled), the fallback is to show the next line in advance; tell
 Claude the measured delay.
